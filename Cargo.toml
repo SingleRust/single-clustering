@@ -12,4 +12,6 @@ ndarray = {version = "0.16.1" , features = ["rayon"]}
 num-traits = "0.2.19"
 petgraph = { version = "0.8.1", features = ["rayon"] }
 rayon = "1.10.0"
-single-utilities = "0.3.0"
+single-utilities = "0.6.0"
+rand = "0.9.0"
+rand_chacha = "0.9.0"
