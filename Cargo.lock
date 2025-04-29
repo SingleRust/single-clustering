@@ -629,7 +629,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "kiddo",
- "nalgebra",
  "nalgebra-sparse",
  "ndarray",
  "num-traits",
