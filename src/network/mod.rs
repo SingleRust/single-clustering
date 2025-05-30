@@ -1,3 +1,4 @@
+use crate::neighborhood::connectivity::GaussianConnectivity;
 use crate::network::grouping::NetworkGrouping;
 use nalgebra_sparse::CsrMatrix;
 use petgraph::data::DataMap;
@@ -243,3 +244,40 @@ where
 
     Network::new_from_graph(graph)
 }
+
+fn csr_to_petgraph<T>(connectivity: CsrMatrix<T>, node_weights: Vec<T>) -> Graph<T, T>
+where
+    T: FloatOpsTS,
+{
+    let mut graph = Graph::with_capacity(node_weights.len(), connectivity.nnz());
+
+    let mut node_indices = Vec::with_capacity(node_weights.len());
+    for weight in node_weights {
+        node_indices.push(graph.add_node(weight));
+    }
+
+    for (row, col, &weight) in connectivity.triplet_iter() {
+        if row <= col {
+            graph.add_edge(node_indices[row], node_indices[col], weight);
+        }
+    }
+
+    graph
+}
+
+pub fn network_from_gaussian_connectivity<T>(
+    distances: &CsrMatrix<T>,
+    node_weights: Vec<T>,
+    n_neighbors: usize,
+    knn: bool,
+) -> Network<T, T>
+where
+    T: FloatOpsTS,
+{
+    let gauss_conn = GaussianConnectivity::new(knn);
+    let connectivity_matrix = gauss_conn.compute_connectivities(distances, n_neighbors);
+    let graph = csr_to_petgraph(connectivity_matrix, node_weights);
+    Network::new_from_graph(graph)
+}
+
+
