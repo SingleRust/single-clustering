@@ -1,0 +1,10 @@
+{
+    "diffEditor.maxFileSize": 250,
+    "rust-analyzer.hover.maxSubstitutionLength": 20,
+    "rust-analyzer.numThreads": 64,
+    "rust-analyzer.cachePriming.numThreads": 16,
+    "rust-analyzer.check.command": "clippy",
+    "rust-analyzer.lens.references.adt.enable": true,
+    "rust-analyzer.cargo.features": [
+    ]
+}

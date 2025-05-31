@@ -19,7 +19,7 @@ where
 
 impl<T> StandardLocalMoving<T>
 where
-    T: FloatOpsTS {
+    T: FloatOpsTS + 'static {
 
     pub fn new(resolution: T) -> Self {
         StandardLocalMoving {

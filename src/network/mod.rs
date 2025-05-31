@@ -1,6 +1,6 @@
 use crate::neighborhood::connectivity::GaussianConnectivity;
 use crate::network::grouping::NetworkGrouping;
-use nalgebra_sparse::CsrMatrix;
+use nalgebra_sparse::{CooMatrix, CsrMatrix};
 use petgraph::data::DataMap;
 use petgraph::graph::{Edges, UnGraph};
 use petgraph::prelude::{EdgeRef, NodeIndex};
@@ -44,7 +44,7 @@ where
 impl<N, E> Default for Network<N, E>
 where
     N: FloatOpsTS,
-    E: FloatOpsTS,
+    E: FloatOpsTS + 'static,
 {
     fn default() -> Self {
         Self::new()
@@ -54,7 +54,7 @@ where
 impl<N, E> Network<N, E>
 where
     N: FloatOpsTS,
-    E: FloatOpsTS,
+    E: FloatOpsTS + 'static,
 {
     pub fn new() -> Self {
         Network {
@@ -217,11 +217,58 @@ where
 
         Network { graph: subgraph }
     }
+
+    pub fn to_upper_triangular_csr(&self) -> CsrMatrix<E> {
+        let n_nodes = self.nodes();
+        let mut triplets = Vec::new();
+
+        for i in 0..n_nodes {
+            for (neighbor, weight) in self.neighbors(i) {
+                if i <= neighbor {
+                    triplets.push((i, neighbor, weight));
+                }
+            }
+        }
+
+        let row_indices: Vec<usize> = triplets.iter().map(|(r, _, _)| *r).collect();
+        let col_indices: Vec<usize> = triplets.iter().map(|(_, c, _)| *c).collect();
+        let values: Vec<E> = triplets.iter().map(|(_, _, v)| *v).collect();
+
+        CsrMatrix::try_from_csr_data(n_nodes, n_nodes, row_indices, col_indices, values)
+            .expect("Failed to create CSR matrix from network")
+    }
+
+    pub fn to_csr_matrix(&self) -> CsrMatrix<E> {
+        let n_nodes = self.nodes();
+        let estimated_edges = self.graph.edge_count();
+
+        // Pre-allocate vectors with known capacity
+        let mut row_indices = Vec::with_capacity(estimated_edges);
+        let mut col_indices = Vec::with_capacity(estimated_edges);
+        let mut values = Vec::with_capacity(estimated_edges);
+
+        // Direct collection without intermediate triplets vector
+        for i in 0..n_nodes {
+            for (neighbor, weight) in self.neighbors(i) {
+                row_indices.push(i);
+                col_indices.push(neighbor);
+                values.push(weight);
+            }
+        }
+
+        // Create COO matrix directly
+        let coo_matrix =
+            CooMatrix::try_from_triplets(n_nodes, n_nodes, row_indices, col_indices, values)
+                .expect("Failed to create COO matrix from network");
+
+        // Convert COO to CSR
+        CsrMatrix::from(&coo_matrix)
+    }
 }
 
 pub fn network_from_csr_matrix<T>(csr_matrix: CsrMatrix<T>) -> Network<T, T>
 where
-    T: FloatOpsTS,
+    T: FloatOpsTS + 'static,
 {
     let n_nodes = csr_matrix.ncols();
     let mut graph = Graph::with_capacity(n_nodes, csr_matrix.nnz());
@@ -272,12 +319,10 @@ pub fn network_from_gaussian_connectivity<T>(
     knn: bool,
 ) -> Network<T, T>
 where
-    T: FloatOpsTS,
+    T: FloatOpsTS + 'static,
 {
     let gauss_conn = GaussianConnectivity::new(knn);
     let connectivity_matrix = gauss_conn.compute_connectivities(distances, n_neighbors);
     let graph = csr_to_petgraph(connectivity_matrix, node_weights);
     Network::new_from_graph(graph)
 }
-
-

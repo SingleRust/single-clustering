@@ -17,7 +17,7 @@ where
 
 impl<T> Louvain<T>
 where
-    T: FloatOpsTS,
+    T: FloatOpsTS + 'static,
 {
     pub fn new(resolution: T, seed: Option<u64>) -> Self {
         let seed = seed.unwrap_or_default();

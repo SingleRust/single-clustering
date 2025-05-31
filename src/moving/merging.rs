@@ -21,7 +21,7 @@ where
 
 impl<T> LocalMerging<T>
 where
-    T: FloatOpsTS,
+    T: FloatOpsTS + 'static,
 {
     pub fn new(resolution: T, randomness: T) -> Self {
         LocalMerging {

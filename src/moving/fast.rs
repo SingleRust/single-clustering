@@ -24,7 +24,7 @@ where
 
 impl<T> FastLocalMoving<T>
 where
-    T: FloatOpsTS,
+    T: FloatOpsTS + 'static,
 {
     pub fn new(resolution: T) -> Self {
         FastLocalMoving {

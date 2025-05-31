@@ -14,7 +14,7 @@ where
 
 impl<T> GaussianConnectivity<T>
 where
-    T: FloatOpsTS,
+    T: FloatOpsTS + 'static,
 {
     pub fn new(knn: bool) -> Self {
         Self {
@@ -40,7 +40,6 @@ where
         distances: &CsrMatrix<T>,
         n_neighbors: usize,
     ) -> (Array2<usize>, Array2<T>) {
-
         let n_obs = distances.nrows();
         let mut knn_indices = Array2::<usize>::zeros((n_obs, n_neighbors));
         let mut knn_distances = Array2::zeros((n_obs, n_neighbors));
@@ -48,7 +47,12 @@ where
         for i in 0..n_obs {
             let mut neighbors: Vec<(usize, T)> = Vec::new();
 
-            for (col, &dist) in distances.row(i).col_indices().iter().zip(distances.row(i).values().iter()) {
+            for (col, &dist) in distances
+                .row(i)
+                .col_indices()
+                .iter()
+                .zip(distances.row(i).values().iter())
+            {
                 if *col != i || dist > T::zero() {
                     neighbors.push((*col, dist));
                 }
@@ -72,7 +76,8 @@ where
 
         for i in 0..n_obs {
             let sigma_sq = if self.knn {
-                let mut distances_sq: Vec<T> = knn_distances.row(i)
+                let mut distances_sq: Vec<T> = knn_distances
+                    .row(i)
                     .iter()
                     .filter(|&&d| d > T::zero())
                     .map(|&d| d * d)
@@ -81,7 +86,8 @@ where
                 if distances_sq.is_empty() {
                     T::from_f64(1.0).unwrap()
                 } else {
-                    distances_sq.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                    distances_sq
+                        .sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
                     let median_idx = distances_sq.len() / 2;
                     distances_sq[median_idx]
                 }
@@ -113,7 +119,11 @@ where
                 for j in 0..n_neighbors {
                     let neighbor_idx = knn_indices[[i, j]];
 
-                    let pair = if i < neighbor_idx { (i, neighbor_idx) } else { (neighbor_idx, i) };
+                    let pair = if i < neighbor_idx {
+                        (i, neighbor_idx)
+                    } else {
+                        (neighbor_idx, i)
+                    };
                     if processed_pairs.contains(&pair) {
                         continue;
                     }
@@ -121,7 +131,6 @@ where
 
                     if let Some(dist_sq) = distances.get_entry(i, neighbor_idx) {
                         let dist_sq = dist_sq.into_value();
-                        let dist_sq = dist_sq * dist_sq;
                         let weight = self.compute_gaussian_weight(i, neighbor_idx, dist_sq, sigmas);
 
                         if weight > self.min_weight_threshold {
@@ -136,11 +145,11 @@ where
         } else {
             // For dense: compute all pairwise weights above threshold
             for i in 0..n_obs {
-                for j in i..n_obs { // Only upper triangle, then make symmetric
+                for j in i..n_obs {
+                    // Only upper triangle, then make symmetric
                     if let Some(dist) = distances.get_entry(i, j) {
                         let dist = dist.into_value();
-                        let dist_sq = dist * dist;
-                        let weight = self.compute_gaussian_weight(i, j, dist_sq, sigmas);
+                        let weight = self.compute_gaussian_weight(i, j, dist, sigmas);
 
                         if weight > self.min_weight_threshold {
                             triplets.push((i, j, weight));
@@ -154,18 +163,13 @@ where
         }
 
         // Convert to CSR matrix
-        let mut rows = Vec::new();
-        let mut cols = Vec::new();
-        let mut data = Vec::new();
+        let rows: Vec<usize> = triplets.iter().map(|(r, _, _)| *r).collect();
+        let cols: Vec<usize> = triplets.iter().map(|(_, c, _)| *c).collect();
+        let data: Vec<T> = triplets.iter().map(|(_, _, v)| *v).collect();
 
-        for (row, col, val) in triplets {
-            rows.push(row);
-            cols.push(col);
-            data.push(val);
-        }
-
-        CsrMatrix::try_from_csr_data(n_obs, n_obs, rows, cols, data)
-            .expect("Failed to create Gaussian connectivity matrix")
+        let coo = nalgebra_sparse::CooMatrix::try_from_triplets(n_obs, n_obs, rows, cols, data)
+            .expect("Failed to create COO matrix");
+        CsrMatrix::from(&coo)
     }
 
     fn compute_gaussian_weight(&self, i: usize, j: usize, dist_sq: T, sigmas: &[T]) -> T {

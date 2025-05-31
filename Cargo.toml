@@ -12,7 +12,7 @@ description = "A high-performance network clustering library implementing commun
 
 [dependencies]
 anyhow = "1.0.98"
-kiddo = "5.0.3"
+kiddo = {version = "5.0.3" }
 nalgebra-sparse = "0.10.0"
 ndarray = {version = "0.16.1" , features = ["rayon"]}
 num-traits = "0.2.19"
