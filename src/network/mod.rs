@@ -1,7 +1,5 @@
-use crate::neighborhood::connectivity::GaussianConnectivity;
 use crate::network::grouping::NetworkGrouping;
 use nalgebra_sparse::{CooMatrix, CsrMatrix};
-use petgraph::data::DataMap;
 use petgraph::graph::{Edges, UnGraph};
 use petgraph::prelude::{EdgeRef, NodeIndex};
 use rayon::iter::ParallelIterator;
@@ -23,7 +21,7 @@ pub struct NeighborAndWeightIterator<'a, N: 'a, E: 'a> {
     _phantom: std::marker::PhantomData<&'a N>,
 }
 
-impl<'a, N, E> Iterator for NeighborAndWeightIterator<'a, N, E>
+impl<N, E> Iterator for NeighborAndWeightIterator<'_, N, E>
 where
     E: Copy,
 {
@@ -310,19 +308,4 @@ where
     }
 
     graph
-}
-
-pub fn network_from_gaussian_connectivity<T>(
-    distances: &CsrMatrix<T>,
-    node_weights: Vec<T>,
-    n_neighbors: usize,
-    knn: bool,
-) -> Network<T, T>
-where
-    T: FloatOpsTS + 'static,
-{
-    let gauss_conn = GaussianConnectivity::new(knn);
-    let connectivity_matrix = gauss_conn.compute_connectivities(distances, n_neighbors);
-    let graph = csr_to_petgraph(connectivity_matrix, node_weights);
-    Network::new_from_graph(graph)
 }

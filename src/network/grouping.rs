@@ -50,23 +50,13 @@ pub trait NetworkGrouping: Debug + Send + Sync {
 }
 
 #[derive(Debug, Clone)]
+#[derive(Default)]
 pub struct VectorGrouping {
     assignments: Vec<usize>,
     group_count: usize,
     // Cache for frequently accessed group sizes
     group_sizes: Vec<usize>,
     needs_size_update: bool,
-}
-
-impl Default for VectorGrouping {
-    fn default() -> Self {
-        Self {
-            assignments: Vec::new(),
-            group_count: 0,
-            group_sizes: Vec::new(),
-            needs_size_update: false,
-        }
-    }
 }
 
 impl VectorGrouping {

@@ -1,13 +1,14 @@
-use rand::prelude::SliceRandom;
-use rand::RngCore;
-use single_utilities::traits::FloatOpsTS;
-use crate::network::grouping::NetworkGrouping;
 use crate::network::Network;
+use crate::network::grouping::NetworkGrouping;
+use rand::RngCore;
+use rand::prelude::SliceRandom;
+use single_utilities::traits::FloatOpsTS;
 
 #[derive(Debug)]
 pub struct StandardLocalMoving<T>
 where
-    T: FloatOpsTS, {
+    T: FloatOpsTS,
+{
     resolution: T,
     cluster_weights: Vec<T>,
     nodes_per_cluster: Vec<usize>,
@@ -19,8 +20,8 @@ where
 
 impl<T> StandardLocalMoving<T>
 where
-    T: FloatOpsTS + 'static {
-
+    T: FloatOpsTS + 'static,
+{
     pub fn new(resolution: T) -> Self {
         StandardLocalMoving {
             resolution,
@@ -62,8 +63,7 @@ where
 
         for i in 0..node_count {
             let cluster = clustering.get_group(i);
-            self.cluster_weights[cluster] = self.cluster_weights[cluster]
-                + T::from_f64(network.weight(i).to_f64().unwrap()).unwrap();
+            self.cluster_weights[cluster] += network.weight(i);
             self.nodes_per_cluster[cluster] += 1;
         }
 
@@ -95,8 +95,7 @@ where
 
             // Remove node from current cluster
             let node_weight = T::from_f64(network.weight(node).to_f64().unwrap()).unwrap();
-            self.cluster_weights[current_cluster] =
-                self.cluster_weights[current_cluster] - node_weight;
+            self.cluster_weights[current_cluster] -= node_weight;
             self.nodes_per_cluster[current_cluster] -= 1;
 
             if self.nodes_per_cluster[current_cluster] == 0 {
@@ -118,22 +117,21 @@ where
                     self.neighboring_clusters[num_neighboring_clusters] = neighbor_cluster;
                     num_neighboring_clusters += 1;
                 }
-                self.edge_weight_per_cluster[neighbor_cluster] =
-                    self.edge_weight_per_cluster[neighbor_cluster] + edge_weight;
+                self.edge_weight_per_cluster[neighbor_cluster] += edge_weight;
             }
 
             // Find best cluster
             let mut best_cluster = current_cluster;
             let mut max_quality_increment = self.edge_weight_per_cluster[current_cluster]
                 - (node_weight * self.cluster_weights[current_cluster] * self.resolution)
-                / (T::from_f64(2.0).unwrap() * total_edge_weight);
+                    / (T::from_f64(2.0).unwrap() * total_edge_weight);
 
             //println!("ITERATION | Best Cluster {:?} Max Quality Increment {:?}", best_cluster, max_quality_increment.to_f64().unwrap());
 
             for &cluster in &self.neighboring_clusters[..num_neighboring_clusters] {
                 let quality_increment = self.edge_weight_per_cluster[cluster]
                     - (node_weight * self.cluster_weights[cluster] * self.resolution)
-                    / (T::from_f64(2.0).unwrap() * total_edge_weight);
+                        / num_traits::Float::powi(T::from_f64(2.0).unwrap() * total_edge_weight, 2);
                 //println!("ITERATION | Cluster {:?} Quality Increment {:?}", cluster, quality_increment.to_f64().unwrap());
                 if quality_increment > max_quality_increment
                     || (quality_increment == max_quality_increment && cluster < best_cluster)
@@ -146,7 +144,7 @@ where
             }
 
             // Update cluster assignment
-            self.cluster_weights[best_cluster] = self.cluster_weights[best_cluster] + node_weight;
+            self.cluster_weights[best_cluster] += node_weight;
             self.nodes_per_cluster[best_cluster] += 1;
 
             if best_cluster == self.unused_clusters[num_unused_clusters - 1] {
@@ -170,5 +168,4 @@ where
 
         update
     }
-
 }
