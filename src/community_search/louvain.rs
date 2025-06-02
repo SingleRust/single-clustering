@@ -1,4 +1,5 @@
 use crate::moving::standard::StandardLocalMoving;
+use crate::moving::QualityFunction;
 use crate::network::grouping::{NetworkGrouping, VectorGrouping};
 use crate::network::{Graph, Network};
 use rand::SeedableRng;
@@ -31,6 +32,36 @@ where
         }
     }
 
+    pub fn new_with_quality_function(
+        resolution: T, 
+        quality_function: QualityFunction, 
+        seed: Option<u64>
+    ) -> Self {
+        let seed = seed.unwrap_or_default();
+        println!(
+            "WARNING!!!!! This implementation extremely highly unfinished and will be moved to a separate package in the future!"
+        );
+        Louvain {
+            rng: ChaCha20Rng::seed_from_u64(seed),
+            local_moving: StandardLocalMoving::new_with_quality_function(resolution, quality_function),
+            iterno: 0,
+        }
+    }
+
+    pub fn new_cpm(resolution: T, seed: Option<u64>) -> Self {
+        Self::new_with_quality_function(resolution, QualityFunction::CPM, seed)
+    }
+
+    /// Create a new Louvain instance with RBConfiguration quality function (like Modularity)
+    pub fn new_rb_configuration(resolution: T, seed: Option<u64>) -> Self {
+        Self::new_with_quality_function(resolution, QualityFunction::RBConfiguration, seed)
+    }
+
+    /// Create a new Louvain instance with standard Modularity (resolution = 1.0)
+    pub fn new_modularity(seed: Option<u64>) -> Self {
+        Self::new_rb_configuration(T::one(), seed)
+    }
+
     pub fn iterate_one_level(
         &mut self,
         network: &Network<T, T>,
@@ -60,6 +91,10 @@ where
         update |= self.iterate(&reduced_network, &mut reduced_clustering);
         clustering.merge(&reduced_clustering);
         update
+    }
+
+    pub fn quality(&self, network: &Network<T, T>, clustering: &VectorGrouping) -> T {
+        self.local_moving.calculate_quality(network, clustering)
     }
 
     pub fn build_network<I>(n_nodes: usize, n_edges: usize, adjacency: I) -> Network<f64, f64>

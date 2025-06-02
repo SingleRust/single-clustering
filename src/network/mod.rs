@@ -240,12 +240,10 @@ where
         let n_nodes = self.nodes();
         let estimated_edges = self.graph.edge_count();
 
-        // Pre-allocate vectors with known capacity
         let mut row_indices = Vec::with_capacity(estimated_edges);
         let mut col_indices = Vec::with_capacity(estimated_edges);
         let mut values = Vec::with_capacity(estimated_edges);
 
-        // Direct collection without intermediate triplets vector
         for i in 0..n_nodes {
             for (neighbor, weight) in self.neighbors(i) {
                 row_indices.push(i);
@@ -254,12 +252,10 @@ where
             }
         }
 
-        // Create COO matrix directly
         let coo_matrix =
             CooMatrix::try_from_triplets(n_nodes, n_nodes, row_indices, col_indices, values)
                 .expect("Failed to create COO matrix from network");
 
-        // Convert COO to CSR
         CsrMatrix::from(&coo_matrix)
     }
 }
@@ -268,23 +264,32 @@ pub fn network_from_csr_matrix<T>(csr_matrix: CsrMatrix<T>) -> Network<T, T>
 where
     T: FloatOpsTS + 'static,
 {
-    let n_nodes = csr_matrix.ncols();
+    let n_nodes = csr_matrix.nrows();
     let mut graph = Graph::with_capacity(n_nodes, csr_matrix.nnz());
 
+    // Add vertices (like g.add_vertices(adjacency.shape[0]))
     let mut node_indices = Vec::with_capacity(n_nodes);
+    for _ in 0..n_nodes {
+        node_indices.push(graph.add_node(T::zero())); // Initialize with zero
+    }
+
 
     let mut node_weights = vec![T::zero(); n_nodes];
 
-    for (row, row_vec) in csr_matrix.row_iter().enumerate() {
-        let weight = row_vec.values().iter().fold(T::zero(), |acc, &x| acc + x);
-        node_weights[row] = weight;
-        node_indices.push(graph.add_node(weight));
+    for (row, col, &weight) in csr_matrix.triplet_iter() {
+        // Add edge with original weight (like g.add_edges + g.es["weight"])
+        graph.add_edge(node_indices[row], node_indices[col], weight);
+        
+        // Update node weights (degrees)
+        node_weights[row] += weight;
+        if row != col {  // Avoid double-counting self-loops
+            node_weights[col] += weight;
+        }
     }
 
-    for (row, col, &weight) in csr_matrix.triplet_iter() {
-        if row <= col {
-            graph.add_edge(node_indices[row], node_indices[col], weight);
-        }
+    // Set final node weights (equivalent to igraph's automatic degree calculation)
+    for (i, &weight) in node_weights.iter().enumerate() {
+        *graph.node_weight_mut(node_indices[i]).unwrap() = weight;
     }
 
     Network::new_from_graph(graph)
