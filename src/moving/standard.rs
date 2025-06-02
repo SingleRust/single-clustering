@@ -56,7 +56,7 @@ where
         
         let two_m = total_edge_weight_2m;
         let term1 = k_i_in / two_m;
-        let term2 = (node_weight * cluster_tot * self.resolution) / (two_m * two_m);
+        let term2 = (node_weight * cluster_tot * self.resolution) / (T::from(2).unwrap() * two_m * two_m);
         
         term1 - term2
     }
@@ -103,8 +103,9 @@ where
         self.node_order.clear();
         self.node_order.extend(0..node_count);
         self.node_order.shuffle(rng);
-
-        let total_edge_weight_2m = network.get_total_edge_weight() * T::from(2).unwrap();
+        
+        //changed here
+        let total_edge_weight_2m = network.get_total_edge_weight();
         let mut global_update = false;
 
         // Keep iterating until no improvements are found
