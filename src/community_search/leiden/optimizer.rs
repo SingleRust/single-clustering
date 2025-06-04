@@ -412,4 +412,255 @@ impl LeidenOptimizer {
 
         Ok(total_improv)
     }
+
+    fn move_nodes_constrained<N, G, P>(
+        &mut self,
+        partitions: &mut [P],
+        layer_weights: &[N],
+        consider_comms: ConsiderComms,
+        constrained_partition: &P,
+        max_comm_size: Option<usize>,
+    ) -> anyhow::Result<N>
+    where
+        N: FloatOpsTS + 'static,
+        G: NetworkGrouping + Clone + Default,
+        P: VertexPartition<N, G>,
+    {
+        if partitions.is_empty() {
+            return Ok(N::from(-1.0).unwrap());
+        }
+
+        let nb_layers = partitions.len();
+        let n = partitions[0].node_count();
+
+        for partition in partitions.iter() {
+            if partition.node_count() != n {
+                return Err(anyhow::anyhow!(
+                    "Number of nodes are not equal for all graphs."
+                ));
+            }
+        }
+
+        let mut total_improv = N::zero();
+        let mut is_node_stable = vec![false; n];
+        let mut nb_moves = 0;
+
+        let mut nodes: Vec<usize> = (0..n).collect();
+        nodes.shuffle(&mut self.rng);
+        let mut vertex_order: VecDeque<usize> = nodes.into();
+
+        // Get constrained communities structure
+        let constrained_comms = constrained_partition.get_communities();
+
+        let mut comm_added = vec![false; partitions[0].community_count()];
+        let mut comms = Vec::new();
+
+        while let Some(v) = vertex_order.pop_front() {
+            for &comm in &comms {
+                if comm < comm_added.len() {
+                    comm_added[comm] = false;
+                }
+            }
+
+            comms.clear();
+
+            let v_comm = partitions[0].membership(v);
+
+            self.collect_constrained_candidate_communities(
+                v,
+                partitions,
+                constrained_partition,
+                &constrained_comms,
+                consider_comms,
+                &mut comms,
+                &mut comm_added,
+            );
+
+            let (max_comm, max_improv) = self.find_best_community_move_constrained(
+                v,
+                v_comm,
+                &comms,
+                partitions,
+                layer_weights,
+                max_comm_size,
+            )?;
+
+            is_node_stable[v] = true;
+
+            if max_comm != v_comm {
+                total_improv += max_improv;
+
+                for partition in partitions.iter_mut() {
+                    partition.move_node(v, max_comm);
+                }
+
+                self.mark_constrained_neighbors_unstable(
+                    v,
+                    max_comm,
+                    &partitions[0],
+                    constrained_partition,
+                    &mut is_node_stable,
+                    &mut vertex_order,
+                );
+                nb_moves += 1;
+            }
+        }
+
+        partitions[0].renumber_communities();
+        let membership = partitions[0].membership_vector();
+        for partition in partitions.iter_mut().skip(1) {
+            partition.set_membership(&membership);
+        }
+
+        Ok(total_improv)
+    }
+
+    fn collect_constrained_candidate_communities<N, G, P>(
+        &mut self,
+        v: usize,
+        partitions: &[P],
+        constrained_partition: &P,
+        constrained_comms: &[Vec<usize>],
+        consider_comms: ConsiderComms,
+        comms: &mut Vec<usize>,
+        comm_added: &mut [bool],
+    ) where
+        N: FloatOpsTS + 'static,
+        G: NetworkGrouping,
+        P: VertexPartition<N, G>,
+    {
+        match consider_comms {
+            ConsiderComms::AllComms => {
+                let v_constrained_comm = constrained_partition.membership(v);
+                if v_constrained_comm < constrained_comms.len() {
+                    for &u in &constrained_comms[v_constrained_comm] {
+                        let u_comm = partitions[0].membership(u);
+                        if u_comm < comm_added.len() && !comm_added[u_comm] {
+                            comms.push(u_comm);
+                            comm_added[u_comm] = true;
+                        }
+                    }
+                }
+            }
+            ConsiderComms::AllNeighComms => {
+                for partition in partitions {
+                    let constrained_membership = constrained_partition.membership_vector();
+                    let neigh_comms = partition.get_neigh_comms(v, Some(&constrained_membership));
+                    for comm in neigh_comms {
+                        if comm < comm_added.len() && !comm_added[comm] {
+                            comms.push(comm);
+                            comm_added[comm] = true;
+                        }
+                    }
+                }
+            }
+            ConsiderComms::RandComm => {
+                let v_constrained_comm = constrained_partition.membership(v);
+                if v_constrained_comm < constrained_comms.len()
+                    && !constrained_comms[v_constrained_comm].is_empty()
+                {
+                    let random_idx = self
+                        .rng
+                        .random_range(0..constrained_comms[v_constrained_comm].len());
+                    let random_node = constrained_comms[v_constrained_comm][random_idx];
+                    let rand_comm = partitions[0].membership(random_node);
+                    comms.push(rand_comm);
+                    if rand_comm < comm_added.len() {
+                        comm_added[rand_comm] = true;
+                    }
+                }
+            }
+            ConsiderComms::RandNeighComm => {
+                let mut all_neigh_comms_incl_dupes = Vec::new();
+                for partition in partitions {
+                    let constrained_membership = constrained_partition.membership_vector();
+                    let neigh_comms = partition.get_neigh_comms(v, Some(&constrained_membership));
+                    all_neigh_comms_incl_dupes.extend(neigh_comms);
+                }
+
+                if !all_neigh_comms_incl_dupes.is_empty() {
+                    let random_idx = self.rng.random_range(0..all_neigh_comms_incl_dupes.len());
+                    let rand_comm = all_neigh_comms_incl_dupes[random_idx];
+                    comms.push(rand_comm);
+                    if rand_comm < comm_added.len() {
+                        comm_added[rand_comm] = true;
+                    }
+                }
+            }
+        }
+    }
+
+    fn find_best_community_move_constrained<N, G, P>(
+        &self,
+        v: usize,
+        v_comm: usize,
+        comms: &[usize],
+        partitions: &[P],
+        layer_weights: &[N],
+        max_comm_size: Option<usize>,
+    ) -> anyhow::Result<(usize, N)>
+    where
+        N: FloatOpsTS + 'static,
+        G: NetworkGrouping,
+        P: VertexPartition<N, G>,
+    {
+        let mut max_comm = v_comm;
+        let mut max_improv = if let Some(max_size) = max_comm_size {
+            if max_size < partitions[0].csize(v_comm) {
+                N::from(f64::NEG_INFINITY).unwrap()
+            } else {
+                N::from(10.0 * f64::EPSILON).unwrap()
+            }
+        } else {
+            N::from(10.0 * f64::EPSILON).unwrap()
+        };
+
+        let v_size = 1;
+
+        for &comm in comms {
+            if let Some(max_size) = max_comm_size {
+                if max_size < partitions[0].csize(comm) + v_size {
+                    continue;
+                }
+            }
+
+            let mut possible_improvement = N::zero();
+            for (layer, partition) in partitions.iter().enumerate() {
+                let layer_improv = partition.diff_move(v, comm);
+                possible_improvement += layer_weights[layer] * layer_improv;
+            }
+
+            if possible_improvement > max_improv {
+                max_comm = comm;
+                max_improv = possible_improvement;
+            }
+        }
+
+        Ok((max_comm, max_improv))
+    }
+
+    fn mark_constrained_neighbors_unstable<N, G, P>(
+        &self,
+        v: usize,
+        new_comm: usize,
+        partition: &P,
+        constrained_partition: &P,
+        is_node_stable: &mut [bool],
+        vertex_order: &mut VecDeque<usize>,
+    ) where
+        N: FloatOpsTS + 'static,
+        G: NetworkGrouping,
+        P: VertexPartition<N, G>,
+    {
+        let v_constrained_comm = constrained_partition.membership(v);
+        for (neighbor, _) in partition.network().neighbors(v) {
+            if is_node_stable[neighbor]
+                && partition.membership(neighbor) != new_comm
+                && constrained_partition.membership(neighbor) == v_constrained_comm
+            {
+                vertex_order.push_back(neighbor);
+                is_node_stable[neighbor] = false;
+            }
+        }
+    }
 }
