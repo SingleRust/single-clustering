@@ -7,6 +7,7 @@ use single_utilities::traits::FloatOpsTS;
 use crate::network::{Network, grouping::NetworkGrouping};
 pub mod partition;
 mod optimizer;
+pub use optimizer::LeidenOptimizer;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ConsiderComms {
@@ -41,7 +42,7 @@ impl Default for LeidenConfig {
         Self {
             max_iterations: 100,
             tolerance: 1e-6,
-            seed: None,
+            seed: Some(42),
             max_community_size: None,
             refine_partition: true,
             consider_empty_community: true,

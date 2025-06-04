@@ -46,6 +46,10 @@ where
     }
 
     fn total_weight_from_comm(&self, community: usize) -> N {
+        if community >= self.grouping.group_count() {
+            return N::zero();
+        }
+
         let members = &self.grouping.get_group_members()[community];
         let mut total_weight = N::zero();
 
@@ -63,6 +67,10 @@ where
     }
 
     fn total_weight_in_comm(&self, community: usize) -> N {
+        if community >= self.grouping.group_count() {
+            return N::zero();
+        }
+
         let members = &self.grouping.get_group_members()[community];
         let mut total_weight = N::zero();
 
@@ -138,6 +146,7 @@ where
     }
 
     fn diff_move(&self, node: usize, new_community: usize) -> N {
+        //println!("was called with node: {:?}, comm: {:?}", node, new_community);
         let old_community = self.grouping.get_group(node);
         if new_community == old_community {
             return N::zero();

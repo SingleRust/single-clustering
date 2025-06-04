@@ -1,14 +1,13 @@
-use std::{collections::VecDeque, os::unix::process::parent_id};
+use std::{collections::VecDeque, time::Instant};
 
 use anyhow::Ok;
-use num_traits::Float;
-use rand::{Rng, seq::SliceRandom};
+use rand::{seq::SliceRandom, Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use single_utilities::traits::FloatOpsTS;
 
 use crate::{
     community_search::leiden::{
-        partition::{self, VertexPartition}, ConsiderComms, LeidenConfig
+        partition::{VertexPartition}, ConsiderComms, LeidenConfig
     },
     network::{grouping::NetworkGrouping, Network},
 };
@@ -19,6 +18,16 @@ pub struct LeidenOptimizer {
 }
 
 impl LeidenOptimizer {
+
+    pub fn new(config: LeidenConfig) -> Self {
+        let rng = match config.seed {
+            Some(n) => ChaCha8Rng::seed_from_u64(n),
+            None => ChaCha8Rng::from_os_rng(),
+        };
+
+        Self { config, rng }
+    }
+
     fn merge_nodes<N, G, P>(
         &mut self,
         partitions: &mut [P],
@@ -49,7 +58,7 @@ impl LeidenOptimizer {
         let mut fixed_nodes = Vec::new();
         let mut fixed_membership = vec![0; n];
         if renumber_fixed_nodes {
-            for v in (0..n) {
+            for v in 0..n {
                 if is_membership_fixed[v] {
                     fixed_nodes.push(v);
                     fixed_membership[v] = partitions[0].membership(v);
@@ -916,6 +925,7 @@ impl LeidenOptimizer {
         G: NetworkGrouping + Clone + Default,
         P: VertexPartition<N, G>,
     {
+        println!("Optimizing partition! Start...");
         if partitions.is_empty() {
             return Err(anyhow::anyhow!("No partitions provided"));
         }
@@ -950,8 +960,10 @@ impl LeidenOptimizer {
 
         let mut total_improvement = N::zero();
         let mut aggregate_further = true;
-
+        let mut i = 0;
+        let mut time = Instant::now();
         while aggregate_further {
+            println!("Starting iteration {:?}, time: {:?}", i, time.elapsed());
             let improvement = match self.config.optimise_routine {
                 super::OptimiseRoutine::MoveNodes => self.move_nodes(
                     &mut collapsed_partitions,
@@ -971,6 +983,7 @@ impl LeidenOptimizer {
                     self.config.max_community_size,
                 )?,
             };
+            println!("Finished moving nodes {:?}, time: {:?}", i, time.elapsed());
 
             total_improvement += improvement;
 
@@ -981,6 +994,7 @@ impl LeidenOptimizer {
                     .enumerate()
                     .all(|(i, &v)| i == v)
             {
+                println!("First Iteration Aggregate {:?}, time: {:?}", i, time.elapsed());
                 for (layer, partition) in partitions.iter_mut().enumerate() {
                     self.from_coarse_partition(
                         partition,
@@ -990,12 +1004,14 @@ impl LeidenOptimizer {
                 }
             } else {
                 // if not first iteration copy back directly
+                println!("Not first iteration affrefate {:?}, time: {:?}", i, time.elapsed());
                 for (orig, collapsed) in partitions.iter_mut().zip(collapsed_partitions.iter()) {
                     let membership = collapsed.membership_vector();
                     orig.set_membership(&membership);
                 }
             }
 
+            println!("Refining partition {:?}, time: {:?}", i, time.elapsed());
             let new_collapsed_partitions = if self.config.refine_partition {
                 self.refine_and_collapse(
                     &collapsed_partitions,
@@ -1007,7 +1023,10 @@ impl LeidenOptimizer {
                 self.simple_collapse(&collapsed_partitions)?
             };
 
+            println!("Refining partition done{:?}, time: {:?}", i, time.elapsed());
+
             if self.config.refine_partition {
+                println!("Refining partition aggregate {:?}, time: {:?}", i, time.elapsed());
                 for v in 0..n {
                     let aggregate_node = aggregate_node_per_individual_node[v];
                     if aggregate_node < new_collapsed_partitions[0].node_count() {
@@ -1015,6 +1034,7 @@ impl LeidenOptimizer {
                             new_collapsed_partitions[0].membership(aggregate_node);
                     }
                 }
+                println!("Took {:?}, time: {:?}", i, time.elapsed());
             }
 
             is_collapsed_membership_fixed = vec![false; new_collapsed_partitions[0].node_count()];
@@ -1034,6 +1054,7 @@ impl LeidenOptimizer {
 
             collapsed_partitions = new_collapsed_partitions;
             is_first_iteration = false;
+            i += 1;
         }
 
         partitions[0].renumber_communities();

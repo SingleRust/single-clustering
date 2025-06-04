@@ -72,6 +72,7 @@ where
     }
 
     fn add_empty_community(&mut self) {
+        
         // This is handled implicitly when we move a node to a new community number
     }
 
