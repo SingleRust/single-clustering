@@ -1,5 +1,6 @@
 use std::{collections::VecDeque, os::unix::process::parent_id};
 
+use anyhow::Ok;
 use num_traits::Float;
 use rand::{Rng, seq::SliceRandom};
 use rand_chacha::ChaCha8Rng;
@@ -662,5 +663,115 @@ impl LeidenOptimizer {
                 is_node_stable[neighbor] = false;
             }
         }
+    }
+
+    fn merge_nodes_constrained<N, G, P>(
+        &mut self,
+        partitions: &mut [P],
+        layer_weights: &[N],
+        consider_comms: ConsiderComms,
+        constrained_partition: &P,
+        max_comm_size: Option<usize>,
+    ) -> anyhow::Result<N>
+    where
+        N: FloatOpsTS + 'static,
+        G: NetworkGrouping + Clone + Default,
+        P: VertexPartition<N, G>,
+    {
+        let nb_layers = partitions.len();
+        if nb_layers == 0 {
+            return Ok(N::from(-1.0).unwrap());
+        }
+
+        let n = partitions[0].node_count();
+
+        // Check all partitions have same number of nodes
+        for partition in partitions.iter() {
+            if partition.node_count() != n {
+                return Err(anyhow::anyhow!(
+                    "Number of nodes are not equal for all graphs."
+                ));
+            }
+        }
+
+        let mut total_improv = N::zero();
+
+        // Establish vertex order and shuffle it
+        let mut vertex_order: Vec<usize> = (0..n).collect();
+        vertex_order.shuffle(&mut self.rng);
+
+        // Get constrained communities structure
+        let constrained_comms = constrained_partition.get_communities();
+
+        let mut comm_added = vec![false; partitions[0].community_count()];
+        let mut comms = Vec::new();
+
+
+        for v in vertex_order {
+            let v_comm = partitions[0].membership(v);
+
+            if partitions[0].cnodes(v_comm) == 1 {
+                for &comm in &comms {
+                    if comm < comm_added.len() {
+                        comm_added[comm] = false;
+                    }
+                }
+            }
+
+            comms.clear();
+
+            self.collect_constrained_candidate_communities(v, partitions, constrained_partition, &constrained_comms, consider_comms, &mut comms, &mut comm_added);
+
+            let mut max_comm = v_comm;
+            let mut max_improv = if let Some(max_size) = max_comm_size {
+                if max_size < partitions[0].csize(v_comm) {
+                    N::from(f64::NEG_INFINITY).unwrap()
+                } else {
+                    N::zero()
+                }
+            } else {
+                N::zero()
+            };
+
+            let v_size = 1;
+
+            for &comm in &comms {
+                if let Some(max_size) = max_comm_size {
+                    if max_size < partitions[0].csize(comm) + v_size {
+                        continue;
+                    }
+                }
+
+                let mut possible_improv = N::zero();
+
+                for (layer, partition) in partitions.iter().enumerate() {
+                    let layer_imrpov = partition.diff_move(v, comm);
+                    possible_improv += layer_weights[layer] * layer_imrpov;
+                }
+
+                if possible_improv >= max_improv {
+                    max_comm = comm;
+                    max_improv = possible_improv;
+                }
+            }
+
+
+            if max_comm != v_comm {
+                total_improv += max_improv;
+
+                for partition in partitions.iter_mut() {
+                    partition.move_node(v, max_comm);
+                }
+            }
+
+        }
+
+        partitions[0].renumber_communities();
+        let membership = partitions[0].membership_vector();
+        for partition in partitions.iter_mut().skip(1) {
+            partition.set_membership(&membership);
+        }
+
+        Ok(total_improv)
     }
 }
