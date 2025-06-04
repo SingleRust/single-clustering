@@ -103,12 +103,12 @@ where
     N: FloatOpsTS + 'static,
     G: NetworkGrouping + Clone + Default,
 {
-    fn create_partition(&self, network: Network<N, N>) -> Self {
+    fn create_partition(network: Network<N, N>) -> Self {
         let node_count = network.nodes();
         Self::new(network, G::create_isolated(node_count))
     }
 
-    fn create_with_membership(&self, network: Network<N, N>, membership: &[usize]) -> Self {
+    fn create_with_membership(network: Network<N, N>, membership: &[usize]) -> Self {
         Self::new(network, G::from_assignments(membership))
     }
 

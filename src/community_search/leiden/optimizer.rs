@@ -8,10 +8,9 @@ use single_utilities::traits::FloatOpsTS;
 
 use crate::{
     community_search::leiden::{
-        ConsiderComms, LeidenConfig,
-        partition::{self, VertexPartition},
+        partition::{self, VertexPartition}, ConsiderComms, LeidenConfig
     },
-    network::grouping::NetworkGrouping,
+    network::{grouping::NetworkGrouping, Network},
 };
 
 pub struct LeidenOptimizer {
@@ -798,7 +797,7 @@ impl LeidenOptimizer {
 
         for partition in collapsed_partitions {
             let network = partition.network().clone();
-            let sub_partition = partition.create_partition(network);
+            let sub_partition = P::create_partition(network);
             sub_collapsed_partitions.push(sub_partition);
         }
 
@@ -840,8 +839,7 @@ impl LeidenOptimizer {
                 }
             }
 
-            let new_partition = collapsed_partitions[layer]
-                .create_with_membership(collapsed_network, &new_membership);
+            let new_partition = P::create_with_membership(collapsed_network, &new_membership);
             new_collapsed_partitions.push(new_partition);
         }
 
@@ -860,7 +858,7 @@ impl LeidenOptimizer {
             let collapsed_network = partition
                 .network()
                 .create_reduced_network(partition.grouping());
-            let new_partition = partition.create_partition(collapsed_network);
+            let new_partition = P::create_partition(collapsed_network);
             new_collapsed_partitions.push(new_partition);
         }
 
@@ -1050,4 +1048,40 @@ impl LeidenOptimizer {
 
         Ok(total_improvement)
     }
+
+    pub fn optimize_single_partition<N, G, P>(
+        &mut self,
+        partition: &mut P,
+        is_membership_fixed: Option<&[bool]>,
+    ) -> anyhow::Result<N>
+    where
+        N: FloatOpsTS + 'static,
+        G: NetworkGrouping + Clone + Default,
+        P: VertexPartition<N, G>,
+    {
+        let mut partitions = vec![partition.clone()];
+        let layer_weights = vec![N::one()];
+        let fixed = is_membership_fixed
+            .map(|f| f.to_vec())
+            .unwrap_or_else(|| vec![false; partition.node_count()]);
+
+        let improvement = self.optimize_partition(&mut partitions, &layer_weights, &fixed)?;
+        
+        *partition = partitions.into_iter().next().unwrap();
+        
+        Ok(improvement)
+    }
+
+    pub fn find_partition<N, G, P>(&mut self, network: Network<N, N>) -> anyhow::Result<P>
+    where
+        N: FloatOpsTS + 'static,
+        G: NetworkGrouping + Clone + Default,
+        P: VertexPartition<N, G>,
+    {
+        let mut partition = P::create_partition(network);
+        
+        self.optimize_single_partition(&mut partition, None)?;
+        Ok(partition)
+    }
+
 }

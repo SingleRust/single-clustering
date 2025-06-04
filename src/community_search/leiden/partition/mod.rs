@@ -12,9 +12,9 @@ where
     N: FloatOpsTS + 'static,
     G: NetworkGrouping,
 {
-    fn create_partition(&self, network: Network<N, N>) -> Self;
+    fn create_partition(network: Network<N, N>) -> Self;
 
-    fn create_with_membership(&self, network: Network<N, N>, membership: &[usize]) -> Self;
+    fn create_with_membership(network: Network<N, N>, membership: &[usize]) -> Self;
 
     fn quality(&self) -> N;
 
