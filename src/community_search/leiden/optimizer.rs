@@ -706,7 +706,6 @@ impl LeidenOptimizer {
         let mut comm_added = vec![false; partitions[0].community_count()];
         let mut comms = Vec::new();
 
-
         for v in vertex_order {
             let v_comm = partitions[0].membership(v);
 
@@ -720,7 +719,15 @@ impl LeidenOptimizer {
 
             comms.clear();
 
-            self.collect_constrained_candidate_communities(v, partitions, constrained_partition, &constrained_comms, consider_comms, &mut comms, &mut comm_added);
+            self.collect_constrained_candidate_communities(
+                v,
+                partitions,
+                constrained_partition,
+                &constrained_comms,
+                consider_comms,
+                &mut comms,
+                &mut comm_added,
+            );
 
             let mut max_comm = v_comm;
             let mut max_improv = if let Some(max_size) = max_comm_size {
@@ -755,7 +762,6 @@ impl LeidenOptimizer {
                 }
             }
 
-
             if max_comm != v_comm {
                 total_improv += max_improv;
 
@@ -763,7 +769,6 @@ impl LeidenOptimizer {
                     partition.move_node(v, max_comm);
                 }
             }
-
         }
 
         partitions[0].renumber_communities();
@@ -773,5 +778,276 @@ impl LeidenOptimizer {
         }
 
         Ok(total_improv)
+    }
+
+    fn refine_and_collapse<N, G, P>(
+        &mut self,
+        collapsed_partitions: &[P],
+        layer_weights: &[N],
+        aggregate_node_per_individual_node: &[usize],
+        original_n: usize,
+    ) -> anyhow::Result<Vec<P>>
+    where
+        N: FloatOpsTS + 'static,
+        G: NetworkGrouping + Clone + Default,
+        P: VertexPartition<N, G>,
+    {
+        let nb_layers = collapsed_partitions.len();
+
+        let mut sub_collapsed_partitions: Vec<P> = Vec::with_capacity(nb_layers);
+
+        for partition in collapsed_partitions {
+            let network = partition.network().clone();
+            let sub_partition = partition.create_partition(network);
+            sub_collapsed_partitions.push(sub_partition);
+        }
+
+        match self.config.refine_routine {
+            super::OptimiseRoutine::MoveNodes => {
+                self.move_nodes_constrained(
+                    &mut sub_collapsed_partitions,
+                    layer_weights,
+                    self.config.refine_consider_comms,
+                    &collapsed_partitions[0],
+                    self.config.max_community_size,
+                )?;
+            }
+            super::OptimiseRoutine::MergeNodes => {
+                self.merge_nodes_constrained(
+                    &mut sub_collapsed_partitions,
+                    layer_weights,
+                    self.config.refine_consider_comms,
+                    &collapsed_partitions[0],
+                    self.config.max_community_size,
+                )?;
+            }
+        }
+
+        let mut new_collapsed_partitions = Vec::with_capacity(nb_layers);
+
+        for layer in 0..nb_layers {
+            let collapsed_network = collapsed_partitions[layer]
+                .network()
+                .create_reduced_network(sub_collapsed_partitions[layer].grouping());
+            let refined_membership = sub_collapsed_partitions[layer].membership_vector();
+            let mut new_membership = vec![0; collapsed_network.nodes()];
+
+            for v in 0..collapsed_partitions[layer].node_count() {
+                let refined_comm = refined_membership[v];
+                let original_comm = collapsed_partitions[layer].membership(v);
+                if refined_comm < new_membership.len() {
+                    new_membership[refined_comm] = original_comm;
+                }
+            }
+
+            let new_partition = collapsed_partitions[layer]
+                .create_with_membership(collapsed_network, &new_membership);
+            new_collapsed_partitions.push(new_partition);
+        }
+
+        Ok(new_collapsed_partitions)
+    }
+
+    fn simple_collapse<N, G, P>(&self, collapsed_partitions: &[P]) -> anyhow::Result<Vec<P>>
+    where
+        N: FloatOpsTS + 'static,
+        G: NetworkGrouping + Clone + Default,
+        P: VertexPartition<N, G>,
+    {
+        let mut new_collapsed_partitions = Vec::new();
+
+        for partition in collapsed_partitions {
+            let collapsed_network = partition
+                .network()
+                .create_reduced_network(partition.grouping());
+            let new_partition = partition.create_partition(collapsed_network);
+            new_collapsed_partitions.push(new_partition);
+        }
+
+        Ok(new_collapsed_partitions)
+    }
+
+    fn from_coarse_partition<N, G, P>(
+        &self,
+        fine_partition: &mut P,
+        coarse_partition: &P,
+        aggregate_mapping: &[usize],
+    ) where
+        N: FloatOpsTS + 'static,
+        G: NetworkGrouping,
+        P: VertexPartition<N, G>,
+    {
+        for node in 0..fine_partition.node_count() {
+            if node < aggregate_mapping.len() {
+                let aggregate_node = aggregate_mapping[node];
+                if aggregate_node < coarse_partition.node_count() {
+                    let new_comm = coarse_partition.membership(aggregate_node);
+                    fine_partition.move_node(node, new_comm);
+                }
+            }
+        }
+    }
+
+    fn should_aggregate_further<N, G, P>(
+        &self,
+        new_partition: &P,
+        old_partition: &P,
+        is_collapsed_membership_fixed: &[bool],
+    ) -> bool
+    where
+        N: FloatOpsTS + 'static,
+        G: NetworkGrouping,
+        P: VertexPartition<N, G>,
+    {
+        if is_collapsed_membership_fixed.iter().all(|&fixed| fixed) {
+            return false;
+        }
+
+        new_partition.node_count() < old_partition.node_count()
+            && old_partition.node_count() > old_partition.community_count()
+    }
+
+    pub fn optimize_partition<N, G, P>(
+        &mut self,
+        partitions: &mut [P],
+        layer_weights: &[N],
+        is_membership_fixed: &[bool],
+    ) -> anyhow::Result<N>
+    where
+        N: FloatOpsTS + 'static,
+        G: NetworkGrouping + Clone + Default,
+        P: VertexPartition<N, G>,
+    {
+        if partitions.is_empty() {
+            return Err(anyhow::anyhow!("No partitions provided"));
+        }
+
+        let nb_layers = partitions.len();
+        let n = partitions[0].node_count();
+
+        // Validate all partitions have same number of nodes
+        for partition in partitions.iter() {
+            if partition.node_count() != n {
+                return Err(anyhow::anyhow!(
+                    "Number of nodes are not equal for all graphs"
+                ));
+            }
+        }
+
+        // Store fixed node information
+        let mut fixed_nodes = Vec::new();
+        let mut fixed_membership = vec![0; n];
+        for v in 0..n {
+            if is_membership_fixed[v] {
+                fixed_nodes.push(v);
+                fixed_membership[v] = partitions[0].membership(v);
+            }
+        }
+
+        // Initialize collapsed structures - start with original partitions
+        let mut collapsed_partitions: Vec<P> = partitions.iter().cloned().collect();
+        let mut is_collapsed_membership_fixed = is_membership_fixed.to_vec();
+        let mut aggregate_node_per_individual_node: Vec<usize> = (0..n).collect();
+        let mut is_first_iteration = true;
+
+        let mut total_improvement = N::zero();
+        let mut aggregate_further = true;
+
+        while aggregate_further {
+            let improvement = match self.config.optimise_routine {
+                super::OptimiseRoutine::MoveNodes => self.move_nodes(
+                    &mut collapsed_partitions,
+                    layer_weights,
+                    &is_collapsed_membership_fixed,
+                    self.config.consider_comms,
+                    self.config.consider_empty_community,
+                    false,
+                    self.config.max_community_size,
+                )?,
+                super::OptimiseRoutine::MergeNodes => self.merge_nodes(
+                    &mut collapsed_partitions,
+                    layer_weights,
+                    &is_collapsed_membership_fixed,
+                    self.config.consider_comms,
+                    false, // renumber_fixed_nodes
+                    self.config.max_community_size,
+                )?,
+            };
+
+            total_improvement += improvement;
+
+            if !is_first_iteration
+                || aggregate_node_per_individual_node.len() != n
+                || !aggregate_node_per_individual_node
+                    .iter()
+                    .enumerate()
+                    .all(|(i, &v)| i == v)
+            {
+                for (layer, partition) in partitions.iter_mut().enumerate() {
+                    self.from_coarse_partition(
+                        partition,
+                        &collapsed_partitions[layer],
+                        &aggregate_node_per_individual_node,
+                    );
+                }
+            } else {
+                // if not first iteration copy back directly
+                for (orig, collapsed) in partitions.iter_mut().zip(collapsed_partitions.iter()) {
+                    let membership = collapsed.membership_vector();
+                    orig.set_membership(&membership);
+                }
+            }
+
+            let new_collapsed_partitions = if self.config.refine_partition {
+                self.refine_and_collapse(
+                    &collapsed_partitions,
+                    layer_weights,
+                    &aggregate_node_per_individual_node,
+                    n,
+                )?
+            } else {
+                self.simple_collapse(&collapsed_partitions)?
+            };
+
+            if self.config.refine_partition {
+                for v in 0..n {
+                    let aggregate_node = aggregate_node_per_individual_node[v];
+                    if aggregate_node < new_collapsed_partitions[0].node_count() {
+                        aggregate_node_per_individual_node[v] =
+                            new_collapsed_partitions[0].membership(aggregate_node);
+                    }
+                }
+            }
+
+            is_collapsed_membership_fixed = vec![false; new_collapsed_partitions[0].node_count()];
+            for v in 0..n {
+                if is_membership_fixed[v]
+                    && aggregate_node_per_individual_node[v] < is_collapsed_membership_fixed.len()
+                {
+                    is_collapsed_membership_fixed[aggregate_node_per_individual_node[v]] = true;
+                }
+            }
+
+            aggregate_further = self.should_aggregate_further(
+                &new_collapsed_partitions[0],
+                &collapsed_partitions[0],
+                &is_collapsed_membership_fixed,
+            );
+
+            collapsed_partitions = new_collapsed_partitions;
+            is_first_iteration = false;
+        }
+
+        partitions[0].renumber_communities();
+        if !fixed_nodes.is_empty() {
+            partitions[0].renumber_communities_fixed(&fixed_nodes, &fixed_membership);
+        }
+
+        let membership = partitions[0].membership_vector();
+        for partition in partitions.iter_mut().skip(1) {
+            partition.set_membership(&membership);
+        }
+
+        Ok(total_improvement)
     }
 }
