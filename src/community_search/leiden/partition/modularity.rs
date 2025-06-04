@@ -121,7 +121,7 @@ where
     }
 
     fn quality(&self) -> N {
-        let total_weight = self.network.get_total_edge_weight();
+        let total_weight = self.network.get_total_edge_weight_par();
         if total_weight == N::zero() {
             return N::zero();
         }
@@ -152,7 +152,7 @@ where
             return N::zero();
         }
 
-        let total_weight = self.network.get_total_edge_weight();
+        let total_weight = self.network.get_total_edge_weight_par();
         if total_weight == N::zero() {
             return N::zero();
         }

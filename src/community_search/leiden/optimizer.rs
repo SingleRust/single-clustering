@@ -1,16 +1,33 @@
 use std::{collections::VecDeque, time::Instant};
 
 use anyhow::Ok;
-use rand::{seq::SliceRandom, Rng, SeedableRng};
+use rand::{Rng, SeedableRng, seq::SliceRandom};
 use rand_chacha::ChaCha8Rng;
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use single_utilities::traits::FloatOpsTS;
 
 use crate::{
-    community_search::leiden::{
-        partition::{VertexPartition}, ConsiderComms, LeidenConfig
-    },
-    network::{grouping::NetworkGrouping, Network},
+    community_search::leiden::{ConsiderComms, LeidenConfig, partition::VertexPartition},
+    network::{Network, grouping::NetworkGrouping},
 };
+
+#[derive(Debug, Clone)]
+pub struct CommunityMoveResult<N> {
+    pub community: usize,
+    pub improvement: N,
+}
+
+impl<N: FloatOpsTS> PartialEq for CommunityMoveResult<N> {
+    fn eq(&self, other: &Self) -> bool {
+        self.improvement == other.improvement
+    }
+}
+
+impl<N: FloatOpsTS> PartialOrd for CommunityMoveResult<N> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        self.improvement.partial_cmp(&other.improvement)
+    }
+}
 
 pub struct LeidenOptimizer {
     config: LeidenConfig,
@@ -18,7 +35,6 @@ pub struct LeidenOptimizer {
 }
 
 impl LeidenOptimizer {
-
     pub fn new(config: LeidenConfig) -> Self {
         let rng = match config.seed {
             Some(n) => ChaCha8Rng::seed_from_u64(n),
@@ -164,38 +180,43 @@ impl LeidenOptimizer {
         G: NetworkGrouping,
         P: VertexPartition<N, G>,
     {
-        let mut max_comm = v_comm;
-        let mut max_improv = if let Some(max_size) = max_comm_size {
-            if max_size < partitions[0].csize(v_comm) {
-                N::from(f64::NEG_INFINITY).unwrap()
-            } else {
-                N::from(10.0 * f64::EPSILON).unwrap()
-            }
-        } else {
-            N::from(10.0 * f64::EPSILON).unwrap()
-        };
+        let v_size = 1;
+        let min_improvement = N::from(10.0 * f64::EPSILON).unwrap();
 
-        let v_size = 1; // assuming unsit size
-
-        for &comm in comms {
-            if let Some(max_size) = max_comm_size {
-                if max_size < partitions[0].csize(comm) + v_size {
-                    continue;
+        let best_result = comms
+            .par_iter()
+            .filter_map(|&comm| {
+                if comm == v_comm {
+                    return None;
                 }
-            }
 
-            let mut possible_improv = N::zero();
-            for (layer, partition) in partitions.iter().enumerate() {
-                let layer_improv = partition.diff_move(v, comm);
-                possible_improv += layer_weights[layer] * layer_improv;
-            }
+                if let Some(max_size) = max_comm_size {
+                    if max_size < partitions[0].csize(comm) + v_size {
+                        return None;
+                    }
+                }
 
-            if possible_improv > max_improv {
-                max_comm = comm;
-                max_improv = possible_improv;
-            }
+                let mut total_improvement = N::zero();
+                for (layer, partition) in partitions.iter().enumerate() {
+                    let layer_improv = partition.diff_move(v, comm);
+                    total_improvement += layer_weights[layer] * layer_improv;
+                }
+
+                if total_improvement > min_improvement {
+                    Some(CommunityMoveResult {
+                        community: comm,
+                        improvement: total_improvement,
+                    })
+                } else {
+                    None
+                }
+            })
+            .max_by(|a, b| a.improvement.partial_cmp(&b.improvement).unwrap());
+
+        match best_result {
+            Some(result) => Ok((result.community, result.improvement)),
+            None => Ok((v_comm, N::zero())),
         }
-        Ok((max_comm, max_improv))
     }
 
     fn collect_candidate_communities<N, G, P>(
@@ -312,6 +333,8 @@ impl LeidenOptimizer {
         G: NetworkGrouping + Clone + Default,
         P: VertexPartition<N, G>,
     {
+        let time = Instant::now();
+        println!("MOVE_NODES | Starting | time: {:?}", time.elapsed());
         if partitions.is_empty() {
             return Ok(N::from(-1.0).unwrap());
         }
@@ -347,7 +370,18 @@ impl LeidenOptimizer {
         let mut comm_added = vec![false; partitions[0].community_count()];
         let mut comms = Vec::new();
 
+        println!(
+            "MOVE_NODES | Basic setup finished... | time: {:?}",
+            time.elapsed()
+        );
+        let mut i: i32 = 0;
         while let Some(v) = vertex_order.pop_front() {
+            println!(
+                "MOVE_NODES | Starting while loop | time: {:?} | iteration: {:?}, left: {:?}",
+                time.elapsed(),
+                i,
+                vertex_order.len()
+            );
             let v_comm = partitions[0].membership(v);
             for &comm in &comms {
                 if comm < comm_added.len() {
@@ -355,6 +389,12 @@ impl LeidenOptimizer {
                 }
             }
             comms.clear();
+
+            println!(
+                "MOVE_NODES | Basic setup done | time: {:?} | iteration: {:?}",
+                time.elapsed(),
+                i
+            );
 
             self.collect_candidate_communities(
                 v,
@@ -364,7 +404,18 @@ impl LeidenOptimizer {
                 &mut comm_added,
             );
 
+            println!(
+                "MOVE_NODES | Found all candidates | time: {:?} | iteration: {:?}",
+                time.elapsed(),
+                i
+            );
+
             if consider_empty_community && partitions[0].cnodes(v_comm) > 1 {
+                println!(
+                    "MOVE_NODES | Considering empty move | time: {:?} | iteration: {:?}",
+                    time.elapsed(),
+                    i
+                );
                 let n_comms_before = partitions[0].community_count();
                 let empty_comm = partitions[0].get_empty_community();
                 comms.push(empty_comm);
@@ -380,6 +431,12 @@ impl LeidenOptimizer {
                 }
             }
 
+            println!(
+                "MOVE_NODES | Finsing best community move | time: {:?} | iteration: {:?}",
+                time.elapsed(),
+                i
+            );
+
             let (max_comm, max_improv) = self.find_best_community_move(
                 v,
                 v_comm,
@@ -389,6 +446,12 @@ impl LeidenOptimizer {
                 max_comm_size,
             )?;
 
+            println!(
+                "MOVE_NODES | Found best community move | time: {:?} | iteration: {:?}",
+                time.elapsed(),
+                i
+            );
+
             is_node_stable[v] = true;
 
             if max_comm != v_comm && max_improv > N::zero() {
@@ -397,7 +460,11 @@ impl LeidenOptimizer {
                 for partition in partitions.iter_mut() {
                     partition.move_node(v, max_comm);
                 }
-
+                println!(
+                    "MOVE_NODES | Marking neighbors as unstable | time: {:?} | iteration: {:?}",
+                    time.elapsed(),
+                    i
+                );
                 self.mark_neighbors_unstable(
                     v,
                     max_comm,
@@ -407,6 +474,7 @@ impl LeidenOptimizer {
                     &mut vertex_order,
                 );
             }
+            i += 1;
         }
 
         partitions[0].renumber_communities();
@@ -994,7 +1062,11 @@ impl LeidenOptimizer {
                     .enumerate()
                     .all(|(i, &v)| i == v)
             {
-                println!("First Iteration Aggregate {:?}, time: {:?}", i, time.elapsed());
+                println!(
+                    "First Iteration Aggregate {:?}, time: {:?}",
+                    i,
+                    time.elapsed()
+                );
                 for (layer, partition) in partitions.iter_mut().enumerate() {
                     self.from_coarse_partition(
                         partition,
@@ -1004,7 +1076,11 @@ impl LeidenOptimizer {
                 }
             } else {
                 // if not first iteration copy back directly
-                println!("Not first iteration affrefate {:?}, time: {:?}", i, time.elapsed());
+                println!(
+                    "Not first iteration affrefate {:?}, time: {:?}",
+                    i,
+                    time.elapsed()
+                );
                 for (orig, collapsed) in partitions.iter_mut().zip(collapsed_partitions.iter()) {
                     let membership = collapsed.membership_vector();
                     orig.set_membership(&membership);
@@ -1026,7 +1102,11 @@ impl LeidenOptimizer {
             println!("Refining partition done{:?}, time: {:?}", i, time.elapsed());
 
             if self.config.refine_partition {
-                println!("Refining partition aggregate {:?}, time: {:?}", i, time.elapsed());
+                println!(
+                    "Refining partition aggregate {:?}, time: {:?}",
+                    i,
+                    time.elapsed()
+                );
                 for v in 0..n {
                     let aggregate_node = aggregate_node_per_individual_node[v];
                     if aggregate_node < new_collapsed_partitions[0].node_count() {
@@ -1087,9 +1167,9 @@ impl LeidenOptimizer {
             .unwrap_or_else(|| vec![false; partition.node_count()]);
 
         let improvement = self.optimize_partition(&mut partitions, &layer_weights, &fixed)?;
-        
+
         *partition = partitions.into_iter().next().unwrap();
-        
+
         Ok(improvement)
     }
 
@@ -1100,9 +1180,8 @@ impl LeidenOptimizer {
         P: VertexPartition<N, G>,
     {
         let mut partition = P::create_partition(network);
-        
+
         self.optimize_single_partition(&mut partition, None)?;
         Ok(partition)
     }
-
 }
