@@ -11,6 +11,7 @@ pub mod grouping;
 
 pub type Graph<N, E> = UnGraph<N, E>;
 
+#[derive(Clone)]
 pub struct Network<N, E> {
     pub graph: Graph<N, E>,
 }
