@@ -6,6 +6,8 @@ use crate::network::{grouping::NetworkGrouping, Network};
 
 mod modularity;
 pub use modularity::ModularityPartition;
+mod rb;
+pub use rb::RBConfigurationPartition;
 
 pub trait VertexPartition<N, G>: Send + Sync + Clone
 where

@@ -180,43 +180,38 @@ impl LeidenOptimizer {
         G: NetworkGrouping,
         P: VertexPartition<N, G>,
     {
-        let v_size = 1;
-        let min_improvement = N::from(10.0 * f64::EPSILON).unwrap();
+        let mut max_comm = v_comm;
+        let mut max_improv = if let Some(max_size) = max_comm_size {
+            if max_size < partitions[0].csize(v_comm) {
+                N::from(f64::NEG_INFINITY).unwrap()
+            } else {
+                N::from(10.0 * f64::EPSILON).unwrap()
+            }
+        } else {
+            N::from(10.0 * f64::EPSILON).unwrap()
+        };
 
-        let best_result = comms
-            .par_iter()
-            .filter_map(|&comm| {
-                if comm == v_comm {
-                    return None;
+        let v_size = 1; // assuming unsit size
+
+        for &comm in comms {
+            if let Some(max_size) = max_comm_size {
+                if max_size < partitions[0].csize(comm) + v_size {
+                    continue;
                 }
+            }
 
-                if let Some(max_size) = max_comm_size {
-                    if max_size < partitions[0].csize(comm) + v_size {
-                        return None;
-                    }
-                }
+            let mut possible_improv = N::zero();
+            for (layer, partition) in partitions.iter().enumerate() {
+                let layer_improv = partition.diff_move(v, comm);
+                possible_improv += layer_weights[layer] * layer_improv;
+            }
 
-                let mut total_improvement = N::zero();
-                for (layer, partition) in partitions.iter().enumerate() {
-                    let layer_improv = partition.diff_move(v, comm);
-                    total_improvement += layer_weights[layer] * layer_improv;
-                }
-
-                if total_improvement > min_improvement {
-                    Some(CommunityMoveResult {
-                        community: comm,
-                        improvement: total_improvement,
-                    })
-                } else {
-                    None
-                }
-            })
-            .max_by(|a, b| a.improvement.partial_cmp(&b.improvement).unwrap());
-
-        match best_result {
-            Some(result) => Ok((result.community, result.improvement)),
-            None => Ok((v_comm, N::zero())),
+            if possible_improv > max_improv {
+                max_comm = comm;
+                max_improv = possible_improv;
+            }
         }
+        Ok((max_comm, max_improv))
     }
 
     fn collect_candidate_communities<N, G, P>(
@@ -860,7 +855,7 @@ impl LeidenOptimizer {
         &mut self,
         collapsed_partitions: &[P],
         layer_weights: &[N],
-        aggregate_node_per_individual_node: &[usize],
+        aggregate_node_per_individual_node: &mut [usize],
         original_n: usize,
     ) -> anyhow::Result<Vec<P>>
     where
@@ -898,6 +893,15 @@ impl LeidenOptimizer {
                 )?;
             }
         }
+
+        for v in 0..original_n {
+        if v < aggregate_node_per_individual_node.len() {
+            let aggregate_node = aggregate_node_per_individual_node[v];
+            if aggregate_node < sub_collapsed_partitions[0].node_count() {
+                aggregate_node_per_individual_node[v] = sub_collapsed_partitions[0].membership(aggregate_node);
+            }
+        }
+    }
 
         let mut new_collapsed_partitions = Vec::with_capacity(nb_layers);
 
@@ -942,23 +946,37 @@ impl LeidenOptimizer {
         Ok(new_collapsed_partitions)
     }
 
-    fn from_coarse_partition<N, G, P>(
+    fn from_coarse_partition_with_refinement<N, G, P>(
         &self,
         fine_partition: &mut P,
         coarse_partition: &P,
-        aggregate_mapping: &[usize],
+        aggregate_node_per_individual_node: &[usize],
     ) where
         N: FloatOpsTS + 'static,
         G: NetworkGrouping,
         P: VertexPartition<N, G>,
     {
         for node in 0..fine_partition.node_count() {
-            if node < aggregate_mapping.len() {
-                let aggregate_node = aggregate_mapping[node];
+            if node < aggregate_node_per_individual_node.len() {
+                let aggregate_node = aggregate_node_per_individual_node[node];
                 if aggregate_node < coarse_partition.node_count() {
-                    let new_comm = coarse_partition.membership(aggregate_node);
-                    fine_partition.move_node(node, new_comm);
+                    let new_community = coarse_partition.membership(aggregate_node);
+                    fine_partition.move_node(node, new_community);
                 }
+            }
+        }
+    }
+
+    fn from_coarse_partition_simple<N, G, P>(&self, fine_partition: &mut P, coarse_partition: &P)
+    where
+        N: FloatOpsTS + 'static,
+        G: NetworkGrouping,
+        P: VertexPartition<N, G>,
+    {
+        for node in 0..fine_partition.node_count() {
+            if node < coarse_partition.community_count() {
+                let new_membership = coarse_partition.membership(node);
+                fine_partition.move_node(node, new_membership);
             }
         }
     }
@@ -1055,35 +1073,31 @@ impl LeidenOptimizer {
 
             total_improvement += improvement;
 
-            if !is_first_iteration
-                || aggregate_node_per_individual_node.len() != n
-                || !aggregate_node_per_individual_node
+            // TODO inspect here!
+            if is_first_iteration
+                && aggregate_node_per_individual_node.len() == n
+                && aggregate_node_per_individual_node
                     .iter()
                     .enumerate()
                     .all(|(i, &v)| i == v)
             {
-                println!(
-                    "First Iteration Aggregate {:?}, time: {:?}",
-                    i,
-                    time.elapsed()
-                );
-                for (layer, partition) in partitions.iter_mut().enumerate() {
-                    self.from_coarse_partition(
-                        partition,
-                        &collapsed_partitions[layer],
-                        &aggregate_node_per_individual_node,
-                    );
-                }
-            } else {
-                // if not first iteration copy back directly
-                println!(
-                    "Not first iteration affrefate {:?}, time: {:?}",
-                    i,
-                    time.elapsed()
-                );
+                // First iteration, no aggregation - direct copy
                 for (orig, collapsed) in partitions.iter_mut().zip(collapsed_partitions.iter()) {
                     let membership = collapsed.membership_vector();
                     orig.set_membership(&membership);
+                }
+            } else {
+                // Use coarse partition mapping
+                for (layer, partition) in partitions.iter_mut().enumerate() {
+                    if self.config.refine_partition {
+                        self.from_coarse_partition_with_refinement(
+                            partition,
+                            &collapsed_partitions[layer],
+                            &aggregate_node_per_individual_node,
+                        );
+                    } else {
+                        self.from_coarse_partition_simple(partition, &collapsed_partitions[layer]);
+                    }
                 }
             }
 
@@ -1092,7 +1106,7 @@ impl LeidenOptimizer {
                 self.refine_and_collapse(
                     &collapsed_partitions,
                     layer_weights,
-                    &aggregate_node_per_individual_node,
+                    &mut aggregate_node_per_individual_node,
                     n,
                 )?
             } else {

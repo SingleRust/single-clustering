@@ -10,6 +10,7 @@ where
 {
     network: Network<N, N>,
     grouping: G,
+    total_weight: N
 }
 
 impl<N, G> ModularityPartition<N, G>
@@ -18,7 +19,8 @@ where
     G: NetworkGrouping,
 {
     pub fn new(network: Network<N, N>, grouping: G) -> Self {
-        Self { network, grouping }
+        let tot_weight = network.get_total_edge_weight_par();
+        Self { network, grouping, total_weight: tot_weight}
     }
 
     pub fn new_singleton(network: Network<N, N>) -> Self {
@@ -121,7 +123,7 @@ where
     }
 
     fn quality(&self) -> N {
-        let total_weight = self.network.get_total_edge_weight_par();
+        let total_weight = self.network.get_total_edge_weight_par(); // changed here
         if total_weight == N::zero() {
             return N::zero();
         }
@@ -133,7 +135,7 @@ where
         for community in 0..self.community_count() {
             let w = self.total_weight_in_comm(community);
             let w_out = self.total_weight_from_comm(community);
-            let w_in = self.total_weight_to_comm(community);
+            let w_in = w_out;
             
             // Following C++ formula for undirected graphs:
             // mod += w - w_out*w_in/(4.0*total_weight)
@@ -152,24 +154,24 @@ where
             return N::zero();
         }
 
-        let total_weight = self.network.get_total_edge_weight_par();
+        let total_weight = self.network.get_total_edge_weight_par(); // changed here
         if total_weight == N::zero() {
             return N::zero();
         }
 
         let w_to_old = self.weight_to_comm(node, old_community);
-        let w_from_old = self.weight_from_comm(node, old_community);
+        let w_from_old = w_to_old;
         let w_to_new = self.weight_to_comm(node, new_community);
-        let w_from_new = self.weight_from_comm(node, new_community);
+        let w_from_new = w_to_new;
         
         let k_out = self.node_strength(node);  
         let k_in = k_out;  // For undirected graphs
         let self_weight = self.node_self_weight(node);
         
         let K_out_old = self.total_weight_from_comm(old_community);
-        let K_in_old = self.total_weight_to_comm(old_community);
+        let K_in_old = K_out_old;
         let K_out_new = self.total_weight_from_comm(new_community) + k_out;
-        let K_in_new = self.total_weight_to_comm(new_community) + k_in;
+        let K_in_new = K_out_new;
         
         // For undirected graphs, use 2*total_weight
         let total_weight_factor = N::from(2.0).unwrap() * total_weight;
