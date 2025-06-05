@@ -1,6 +1,9 @@
 use single_utilities::traits::FloatOpsTS;
 
-use crate::{community_search::leiden::partition::VertexPartition, network::{grouping::NetworkGrouping, Network}};
+use crate::{
+    community_search::leiden::partition::VertexPartition,
+    network::{Network, grouping::NetworkGrouping},
+};
 
 #[derive(Clone)]
 pub struct ModularityPartition<N, G>
@@ -10,7 +13,7 @@ where
 {
     network: Network<N, N>,
     grouping: G,
-    total_weight: N
+    total_weight: N,
 }
 
 impl<N, G> ModularityPartition<N, G>
@@ -20,7 +23,11 @@ where
 {
     pub fn new(network: Network<N, N>, grouping: G) -> Self {
         let tot_weight = network.get_total_edge_weight_par();
-        Self { network, grouping, total_weight: tot_weight}
+        Self {
+            network,
+            grouping,
+            total_weight: tot_weight,
+        }
     }
 
     pub fn new_singleton(network: Network<N, N>) -> Self {
@@ -79,9 +86,7 @@ where
         for &node in members {
             for (neighbor, weight) in self.network.neighbors(node) {
                 if self.grouping.get_group(neighbor) == community {
-                    if node < neighbor {
-                        total_weight += weight;
-                    } else if node == neighbor {
+                    if node == neighbor || node < neighbor {
                         total_weight += weight;
                     }
                 }
@@ -136,7 +141,7 @@ where
             let w = self.total_weight_in_comm(community);
             let w_out = self.total_weight_from_comm(community);
             let w_in = w_out;
-            
+
             // Following C++ formula for undirected graphs:
             // mod += w - w_out*w_in/(4.0*total_weight)
             let null_model = (w_out * w_in) / (N::from(4.0).unwrap() * total_weight);
@@ -148,44 +153,36 @@ where
     }
 
     fn diff_move(&self, node: usize, new_community: usize) -> N {
-        //println!("was called with node: {:?}, comm: {:?}", node, new_community);
         let old_community = self.grouping.get_group(node);
         if new_community == old_community {
             return N::zero();
         }
 
-        let total_weight = self.network.get_total_edge_weight_par(); // changed here
+        let total_weight = self.network.get_total_edge_weight_par();
         if total_weight == N::zero() {
             return N::zero();
         }
 
         let w_to_old = self.weight_to_comm(node, old_community);
-        let w_from_old = w_to_old;
         let w_to_new = self.weight_to_comm(node, new_community);
-        let w_from_new = w_to_new;
-        
-        let k_out = self.node_strength(node);  
-        let k_in = k_out;  // For undirected graphs
+
+        let k_out = self.node_strength(node);
         let self_weight = self.node_self_weight(node);
-        
+
         let K_out_old = self.total_weight_from_comm(old_community);
-        let K_in_old = K_out_old;
-        let K_out_new = self.total_weight_from_comm(new_community) + k_out;
-        let K_in_new = K_out_new;
-        
-        // For undirected graphs, use 2*total_weight
+        let K_out_new = self.total_weight_from_comm(new_community);
+
+        // For undirected graphs: total_weight_factor = 2m
         let total_weight_factor = N::from(2.0).unwrap() * total_weight;
-        
-        let diff_old = (w_to_old - k_out * K_in_old / total_weight_factor) + 
-                       (w_from_old - k_in * K_out_old / total_weight_factor);
-        
-        let diff_new = (w_to_new + self_weight - k_out * K_in_new / total_weight_factor) + 
-                       (w_from_new + self_weight - k_in * K_out_new / total_weight_factor);
-        
-        let diff = diff_new - diff_old;
-        
-        // Return normalized diff (divided by m = 2*total_weight for undirected)
-        diff / total_weight_factor
+
+        // Calculate change in modularity
+        // Old: connections to old community (minus self-weight when leaving)
+        let diff_old = w_to_old - self_weight - k_out * K_out_old / total_weight_factor;
+
+        // New: connections to new community (plus self-weight when joining)
+        let diff_new = w_to_new + self_weight - k_out * (K_out_new + k_out) / total_weight_factor;
+
+        (diff_new - diff_old) / total_weight_factor
     }
 
     fn network(&self) -> &Network<N, N> {

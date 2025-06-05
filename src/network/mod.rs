@@ -129,20 +129,24 @@ where
         }
 
         let mut edge_memo = HashMap::new();
-
-        // transferring all edges between nodes of previous graph
-        // see if they are still there after reduction of nodes
-        // if they are still kept, they will be reinserted (same weight or add if multiple edges in that direction!!!!!!!!)
+        let mut self_loop_weights = HashMap::new(); // Track self-loop weights
 
         for edge in self.graph.edge_references() {
             let g1 = grouping.get_group(edge.source().index());
             let g2 = grouping.get_group(edge.target().index());
-            if g1 == g2 {
-                continue; // self loops are ignored !!
-            }
 
-            let (min_g, max_g) = if g1 < g2 { (g1, g2) } else { (g2, g1) };
-            *edge_memo.entry((min_g, max_g)).or_insert(E::zero()) += *edge.weight();
+            if g1 == g2 {
+                *self_loop_weights.entry(g1).or_insert(E::zero()) += *edge.weight();
+            } else {
+                let (min_g, max_g) = if g1 < g2 { (g1, g2) } else { (g2, g1) };
+                *edge_memo.entry((min_g, max_g)).or_insert(E::zero()) += *edge.weight();
+            }
+        }
+
+        for (&group, &weight) in self_loop_weights.iter() {
+            if weight > E::zero() {
+                cluster_g.add_edge(NodeIndex::new(group), NodeIndex::new(group), weight);
+            }
         }
 
         for (&(g1, g2), &weight) in edge_memo.iter() {
