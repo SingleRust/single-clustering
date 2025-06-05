@@ -1,6 +1,7 @@
 use std::{collections::VecDeque, time::Instant};
 
 use anyhow::Ok;
+use num_traits::Float;
 use rand::{Rng, SeedableRng, seq::SliceRandom};
 use rand_chacha::ChaCha8Rng;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
@@ -183,12 +184,12 @@ impl LeidenOptimizer {
         let mut max_comm = v_comm;
         let mut max_improv = if let Some(max_size) = max_comm_size {
             if max_size < partitions[0].csize(v_comm) {
-                N::from(f64::NEG_INFINITY).unwrap()
+                <N as Float>::neg_infinity()
             } else {
-                N::from(10.0 * f64::EPSILON).unwrap()
+                N::from(10.0).unwrap() * <N as Float>::epsilon()
             }
         } else {
-            N::from(10.0 * f64::EPSILON).unwrap()
+            N::from(10.0).unwrap() * <N as Float>::epsilon()
         };
 
         let v_size = 1; // assuming unsit size
@@ -679,12 +680,12 @@ impl LeidenOptimizer {
         let mut max_comm = v_comm;
         let mut max_improv = if let Some(max_size) = max_comm_size {
             if max_size < partitions[0].csize(v_comm) {
-                N::from(f64::NEG_INFINITY).unwrap()
+                <N as Float>::neg_infinity()
             } else {
-                N::from(10.0 * f64::EPSILON).unwrap()
+                N::from(10.0).unwrap() * <N as Float>::epsilon()
             }
         } else {
-            N::from(10.0 * f64::EPSILON).unwrap()
+            N::from(10.0).unwrap() * <N as Float>::epsilon()
         };
 
         let v_size = 1;
@@ -803,7 +804,7 @@ impl LeidenOptimizer {
             let mut max_comm = v_comm;
             let mut max_improv = if let Some(max_size) = max_comm_size {
                 if max_size < partitions[0].csize(v_comm) {
-                    N::from(f64::NEG_INFINITY).unwrap()
+                    <N as Float>::neg_infinity()
                 } else {
                     N::zero()
                 }
@@ -895,13 +896,14 @@ impl LeidenOptimizer {
         }
 
         for v in 0..original_n {
-        if v < aggregate_node_per_individual_node.len() {
-            let aggregate_node = aggregate_node_per_individual_node[v];
-            if aggregate_node < sub_collapsed_partitions[0].node_count() {
-                aggregate_node_per_individual_node[v] = sub_collapsed_partitions[0].membership(aggregate_node);
+            if v < aggregate_node_per_individual_node.len() {
+                let aggregate_node = aggregate_node_per_individual_node[v];
+                if aggregate_node < sub_collapsed_partitions[0].node_count() {
+                    aggregate_node_per_individual_node[v] =
+                        sub_collapsed_partitions[0].membership(aggregate_node);
+                }
             }
         }
-    }
 
         let mut new_collapsed_partitions = Vec::with_capacity(nb_layers);
 
@@ -1112,24 +1114,6 @@ impl LeidenOptimizer {
             } else {
                 self.simple_collapse(&collapsed_partitions)?
             };
-
-            println!("Refining partition done{:?}, time: {:?}", i, time.elapsed());
-
-            if self.config.refine_partition {
-                println!(
-                    "Refining partition aggregate {:?}, time: {:?}",
-                    i,
-                    time.elapsed()
-                );
-                for v in 0..n {
-                    let aggregate_node = aggregate_node_per_individual_node[v];
-                    if aggregate_node < new_collapsed_partitions[0].node_count() {
-                        aggregate_node_per_individual_node[v] =
-                            new_collapsed_partitions[0].membership(aggregate_node);
-                    }
-                }
-                println!("Took {:?}, time: {:?}", i, time.elapsed());
-            }
 
             is_collapsed_membership_fixed = vec![false; new_collapsed_partitions[0].node_count()];
             for v in 0..n {

@@ -158,31 +158,35 @@ where
             return N::zero();
         }
 
-        let total_weight = self.network.get_total_edge_weight_par();
+        let total_weight = N::from(2.0).unwrap() * self.network.get_total_edge_weight_par();
         if total_weight == N::zero() {
             return N::zero();
         }
 
         let w_to_old = self.weight_to_comm(node, old_community);
+        let w_from_old = self.weight_from_comm(node, old_community);
         let w_to_new = self.weight_to_comm(node, new_community);
+        let w_from_new = self.weight_from_comm(node, new_community);
 
         let k_out = self.node_strength(node);
+        let k_in = k_out; 
         let self_weight = self.node_self_weight(node);
 
         let K_out_old = self.total_weight_from_comm(old_community);
-        let K_out_new = self.total_weight_from_comm(new_community);
+        let K_in_old = self.total_weight_to_comm(old_community); 
+        let K_out_new = self.total_weight_from_comm(new_community) + k_out;
+        let K_in_new = self.total_weight_to_comm(new_community) + k_in;
 
-        // For undirected graphs: total_weight_factor = 2m
-        let total_weight_factor = N::from(2.0).unwrap() * total_weight;
+        let diff_old = (w_to_old - k_out * K_in_old / total_weight)
+            + (w_from_old - k_in * K_out_old / total_weight);
 
-        // Calculate change in modularity
-        // Old: connections to old community (minus self-weight when leaving)
-        let diff_old = w_to_old - self_weight - k_out * K_out_old / total_weight_factor;
+        let diff_new = (w_to_new + self_weight - k_out * K_in_new / total_weight)
+            + (w_from_new + self_weight - k_in * K_out_new / total_weight);
 
-        // New: connections to new community (plus self-weight when joining)
-        let diff_new = w_to_new + self_weight - k_out * (K_out_new + k_out) / total_weight_factor;
+        let diff = diff_new - diff_old;
 
-        (diff_new - diff_old) / total_weight_factor
+        let m = total_weight;
+        diff / m
     }
 
     fn network(&self) -> &Network<N, N> {
