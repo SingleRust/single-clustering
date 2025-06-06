@@ -1,6 +1,9 @@
 use single_utilities::traits::FloatOpsTS;
 
-use crate::{community_search::leiden::partition::VertexPartition, network::{grouping::NetworkGrouping, Network}};
+use crate::{
+    community_search::leiden::partition::VertexPartition,
+    network::{Network, grouping::NetworkGrouping},
+};
 
 #[derive(Clone)]
 pub struct RBConfigurationPartition<N, G>
@@ -19,7 +22,11 @@ where
     G: NetworkGrouping,
 {
     pub fn new(network: Network<N, N>, grouping: G, resolution: N) -> Self {
-        Self { network, grouping, resolution }
+        Self {
+            network,
+            grouping,
+            resolution,
+        }
     }
 
     pub fn new_singleton(network: Network<N, N>, resolution: N) -> Self {
@@ -57,9 +64,7 @@ where
         let mut total_weight = N::zero();
 
         for &node in members {
-            for (_, edge_weight) in self.network.neighbors(node) {
-                total_weight += edge_weight;
-            }
+            total_weight += self.node_strength(node);
         }
         total_weight
     }
@@ -81,8 +86,9 @@ where
         for &node in members {
             for (neighbor, weight) in self.network.neighbors(node) {
                 if self.grouping.get_group(neighbor) == community {
-                    // For undirected graphs, count each edge only once
-                    if node <= neighbor {
+                    if node == neighbor {
+                        total_weight += weight;
+                    } else if node <= neighbor {
                         total_weight += weight;
                     }
                 }
@@ -127,66 +133,72 @@ where
     /// Calculate the RB quality function
     /// Q = Σ_{ij} [A_{ij} - γ * k_i * k_j / (2m)] * δ(c_i, c_j)
     fn quality(&self) -> N {
-        let total_edge_weight = self.network.get_total_edge_weight();
-        if total_edge_weight == N::zero() {
+        let mut modularity = N::zero();
+
+        let m = N::from(4.0).unwrap() * self.network.get_total_edge_weight();
+
+        if m == N::zero() {
             return N::zero();
         }
 
-        let two_m = N::from(2.0).unwrap() * total_edge_weight;
-        let mut quality = N::zero();
-
-        // Calculate quality for each community
-        for community in 0..self.community_count() {
-            let w_in = self.total_weight_in_comm(community);
-            let k_out = self.total_weight_from_comm(community);
-            let k_in = self.total_weight_to_comm(community);
-
-            // RB quality: w_in - γ * k_out * k_in / (2m)
-            let null_model_term = self.resolution * k_out * k_in / two_m;
-            quality += w_in - null_model_term;
+        for c in 0..self.community_count() {
+            let w = self.total_weight_in_comm(c);
+            let w_out = self.total_weight_from_comm(c);
+            let w_in = self.total_weight_to_comm(c);
+            modularity += w - self.resolution * w_out * w_in / m;
         }
-
-        quality
+        N::from(2.0).unwrap() * modularity
     }
 
     /// Calculate the difference in quality when moving a node to a new community
     fn diff_move(&self, node: usize, new_community: usize) -> N {
-        let old_community = self.grouping.get_group(node);
-        if new_community == old_community {
+        let mut diff: N = N::zero();
+        let old_comm = self.membership(node);
+        let total_weight = N::from(2.0).unwrap() * self.network.get_total_edge_weight();
+        if total_weight == N::zero() {
             return N::zero();
         }
+        if new_community != old_comm {
+            let w_to_old = self.weight_to_comm(node, old_comm);
+            let w_from_old = self.weight_from_comm(node, old_comm);
 
-        let total_edge_weight = self.network.get_total_edge_weight();
-        if total_edge_weight == N::zero() {
-            return N::zero();
+            let w_to_new = self.weight_to_comm(node, new_community);
+            let w_from_new = self.weight_from_comm(node, new_community);
+
+            let k_out = self.node_strength(node);
+            let k_in = self.node_strength(node);
+
+            let self_weight = self.node_self_weight(node);
+
+            let K_out_old = self.total_weight_from_comm(old_comm);
+            let K_in_old = self.total_weight_to_comm(old_comm);
+
+            let K_out_new = self.total_weight_from_comm(new_community) + k_out;
+            let K_in_new = self.total_weight_to_comm(new_community) + k_in;
+
+            let diff_old = (w_to_old - self.resolution * k_out * K_in_old / total_weight)
+                + (w_from_old - self.resolution * k_in * K_out_old / total_weight);
+            let diff_new = (w_to_new + self_weight
+                - self.resolution * k_out * K_in_new / total_weight)
+                + (w_from_new + self_weight - self.resolution * k_in * K_out_new / total_weight);
+
+            
+
+            diff = diff_new - diff_old;
+
+            if node < 5 {
+                // Only log first few nodes to avoid spam
+                println!(
+                    "Node {}: resolution={:?}, diff_old={:?}, diff_new={:?}, final_diff={:?}",
+                    node,
+                    self.resolution,
+                    diff_old,
+                    diff_new,
+                    diff_new - diff_old
+                );
+            }
         }
-
-        let two_m = N::from(2.0).unwrap() * total_edge_weight;
-        
-        // Get node properties
-        let k_i = self.node_strength(node);
-        let w_to_old = self.weight_to_comm(node, old_community);
-        let w_from_old = w_to_old;
-        let w_to_new = self.weight_to_comm(node, new_community);
-        let w_from_new = w_to_new;
-        let self_weight = self.node_self_weight(node);
-
-        // Get community strengths
-        let k_out_old = self.total_weight_from_comm(old_community);
-        let k_in_old = k_out_old;
-        let k_out_new = self.total_weight_from_comm(new_community);
-        let k_in_new = k_out_new;
-
-        // Calculate change in quality
-        // Loss from removing node from old community
-        let diff_old = w_to_old + w_from_old - self_weight - 
-                       self.resolution * k_i * (k_out_old + k_in_old - k_i) / two_m;
-
-        // Gain from adding node to new community  
-        let diff_new = w_to_new + w_from_new + self_weight - 
-                       self.resolution * k_i * (k_out_new + k_in_new + k_i) / two_m;
-
-        diff_new - diff_old
+        diff
     }
 
     fn network(&self) -> &Network<N, N> {
@@ -216,9 +228,9 @@ where
 
     /// Create RB partition with specified membership and resolution
     pub fn with_membership_and_resolution(
-        network: Network<N, N>, 
-        membership: &[usize], 
-        resolution: N
+        network: Network<N, N>,
+        membership: &[usize],
+        resolution: N,
     ) -> Self {
         Self::new(network, G::from_assignments(membership), resolution)
     }

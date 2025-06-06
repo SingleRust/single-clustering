@@ -372,12 +372,12 @@ impl LeidenOptimizer {
         );
         let mut i: i32 = 0;
         while let Some(v) = vertex_order.pop_front() {
-            println!(
-                "MOVE_NODES | Starting while loop | time: {:?} | iteration: {:?}, left: {:?}",
-                time.elapsed(),
-                i,
-                vertex_order.len()
-            );
+            // println!(
+            //     "MOVE_NODES | Starting while loop | time: {:?} | iteration: {:?}, left: {:?}",
+            //     time.elapsed(),
+            //     i,
+            //     vertex_order.len()
+            // );
             let v_comm = partitions[0].membership(v);
             for &comm in &comms {
                 if comm < comm_added.len() {
@@ -386,11 +386,11 @@ impl LeidenOptimizer {
             }
             comms.clear();
 
-            println!(
-                "MOVE_NODES | Basic setup done | time: {:?} | iteration: {:?}",
-                time.elapsed(),
-                i
-            );
+            // println!(
+            //     "MOVE_NODES | Basic setup done | time: {:?} | iteration: {:?}",
+            //     time.elapsed(),
+            //     i
+            // );
 
             self.collect_candidate_communities(
                 v,
@@ -400,18 +400,18 @@ impl LeidenOptimizer {
                 &mut comm_added,
             );
 
-            println!(
-                "MOVE_NODES | Found all candidates | time: {:?} | iteration: {:?}",
-                time.elapsed(),
-                i
-            );
+            //println!(
+            //    "MOVE_NODES | Found all candidates | time: {:?} | iteration: {:?}",
+            //    time.elapsed(),
+            //    i
+            //);
 
             if consider_empty_community && partitions[0].cnodes(v_comm) > 1 {
-                println!(
-                    "MOVE_NODES | Considering empty move | time: {:?} | iteration: {:?}",
-                    time.elapsed(),
-                    i
-                );
+                //println!(
+                //    "MOVE_NODES | Considering empty move | time: {:?} | iteration: {:?}",
+                //    time.elapsed(),
+                //    i
+                //);
                 let n_comms_before = partitions[0].community_count();
                 let empty_comm = partitions[0].get_empty_community();
                 comms.push(empty_comm);
@@ -427,11 +427,11 @@ impl LeidenOptimizer {
                 }
             }
 
-            println!(
-                "MOVE_NODES | Finsing best community move | time: {:?} | iteration: {:?}",
-                time.elapsed(),
-                i
-            );
+            // println!(
+            //     "MOVE_NODES | Finsing best community move | time: {:?} | iteration: {:?}",
+            //     time.elapsed(),
+            //     i
+            // );
 
             let (max_comm, max_improv) = self.find_best_community_move(
                 v,
@@ -442,11 +442,11 @@ impl LeidenOptimizer {
                 max_comm_size,
             )?;
 
-            println!(
-                "MOVE_NODES | Found best community move | time: {:?} | iteration: {:?}",
-                time.elapsed(),
-                i
-            );
+            // println!(
+            //     "MOVE_NODES | Found best community move | time: {:?} | iteration: {:?}",
+            //     time.elapsed(),
+            //     i
+            // );
 
             is_node_stable[v] = true;
 
@@ -456,11 +456,11 @@ impl LeidenOptimizer {
                 for partition in partitions.iter_mut() {
                     partition.move_node(v, max_comm);
                 }
-                println!(
-                    "MOVE_NODES | Marking neighbors as unstable | time: {:?} | iteration: {:?}",
-                    time.elapsed(),
-                    i
-                );
+                // println!(
+                //     "MOVE_NODES | Marking neighbors as unstable | time: {:?} | iteration: {:?}",
+                //     time.elapsed(),
+                //     i
+                // );
                 self.mark_neighbors_unstable(
                     v,
                     max_comm,

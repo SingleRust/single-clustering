@@ -136,7 +136,8 @@ where
             let g2 = grouping.get_group(edge.target().index());
 
             if g1 == g2 {
-                *self_loop_weights.entry(g1).or_insert(E::zero()) += *edge.weight();
+                let new_weight = *edge.weight();
+                *self_loop_weights.entry(g1).or_insert(E::zero()) += new_weight;
             } else {
                 let (min_g, max_g) = if g1 < g2 { (g1, g2) } else { (g2, g1) };
                 *edge_memo.entry((min_g, max_g)).or_insert(E::zero()) += *edge.weight();
@@ -287,8 +288,12 @@ where
     }
 
     for (row, col, &weight) in csr_matrix.triplet_iter() {
-        if row <= col {
+        if row == col {
             graph.add_edge(node_indices[row], node_indices[col], weight);
+        }
+        if row <= col {
+            let temp_weight = weight * T::from(2.0).unwrap();
+            graph.add_edge(node_indices[row], node_indices[col], temp_weight);
         }
     }
 
