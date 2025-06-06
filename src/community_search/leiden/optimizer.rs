@@ -870,7 +870,7 @@ impl LeidenOptimizer {
 
         for partition in collapsed_partitions {
             let network = partition.network().clone();
-            let sub_partition = P::create_partition(network);
+            let sub_partition = partition.create_like(network);
             sub_collapsed_partitions.push(sub_partition);
         }
 
@@ -922,7 +922,8 @@ impl LeidenOptimizer {
                 }
             }
 
-            let new_partition = P::create_with_membership(collapsed_network, &new_membership);
+            let new_partition = collapsed_partitions[layer]
+                .create_like_with_membership(collapsed_network, &new_membership);
             new_collapsed_partitions.push(new_partition);
         }
 
@@ -941,7 +942,7 @@ impl LeidenOptimizer {
             let collapsed_network = partition
                 .network()
                 .create_reduced_network(partition.grouping());
-            let new_partition = P::create_partition(collapsed_network);
+            let new_partition = partition.create_like(collapsed_network);
             new_collapsed_partitions.push(new_partition);
         }
 

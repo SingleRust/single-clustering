@@ -200,4 +200,12 @@ where
     fn grouping_mut(&mut self) -> &mut G {
         &mut self.grouping
     }
+    
+    fn create_like(&self, network: Network<N, N>) -> Self {
+        Self::create_partition(network)
+    }
+    
+    fn create_like_with_membership(&self, network: Network<N, N>, membership: &[usize]) -> Self {
+        Self::create_with_membership(network, membership)
+    }
 }

@@ -212,6 +212,14 @@ where
     fn grouping_mut(&mut self) -> &mut G {
         &mut self.grouping
     }
+    
+    fn create_like(&self, network: Network<N, N>) -> Self {
+        Self::with_resolution(network, self.resolution)
+    }
+    
+    fn create_like_with_membership(&self, network: Network<N, N>, membership: &[usize]) -> Self {
+        Self::with_membership_and_resolution(network, membership, self.resolution)
+    }
 }
 
 // Convenience constructor functions

@@ -18,6 +18,10 @@ where
 
     fn create_with_membership(network: Network<N, N>, membership: &[usize]) -> Self;
 
+    fn create_like(&self, network: Network<N, N>) -> Self;
+
+    fn create_like_with_membership(&self, network: Network<N, N>, membership: &[usize]) -> Self;
+
     fn quality(&self) -> N;
 
     fn diff_move(&self, node: usize, new_community: usize) -> N;
