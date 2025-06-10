@@ -1,3 +1,4 @@
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use single_utilities::traits::FloatOpsTS;
 
 use crate::{
@@ -208,41 +209,67 @@ where
 
     /// Calculate the difference in quality when moving a node to a new community
     fn diff_move(&self, node: usize, new_community: usize) -> N {
-        let old_comm = self.membership(node);
+        // let old_comm = self.membership(node);
+        // if new_community == old_comm {
+        //     return N::zero();
+        // }
+        
+        // let total_weight = N::from(2.0).unwrap() * self.total_weight;
+        // if total_weight == N::zero() {
+        //     return N::zero();
+        // }
+
+        // let w_to_old = self.weight_to_comm(node, old_comm);
+        // let w_from_old = w_to_old; // For undirected graphs
+
+        // let w_to_new = self.weight_to_comm(node, new_community);
+        // let w_from_new = w_to_new; // For undirected graphs
+
+        // // Use CSRNetwork's cached strength instead of recomputing
+        // let k_out = self.network.strength(node);
+        // let k_in = k_out; // For undirected graphs
+
+        // let self_weight = self.node_self_weight(node);
+
+        // // Use uncached values since this is a const method
+        // let K_out_old = self.compute_total_weight_from_comm_uncached(old_comm);
+        // let K_in_old = K_out_old; // For undirected graphs
+
+        // let K_out_new = self.compute_total_weight_from_comm_uncached(new_community) + k_out;
+        // let K_in_new = K_out_new; // For undirected graphs
+
+        // let diff_old = (w_to_old - self.resolution * k_out * K_in_old / total_weight)
+        //     + (w_from_old - self.resolution * k_in * K_out_old / total_weight);
+        // let diff_new = (w_to_new + self_weight
+        //     - self.resolution * k_out * K_in_new / total_weight)
+        //     + (w_from_new + self_weight - self.resolution * k_in * K_out_new / total_weight);
+
+        // diff_new - diff_old
+        let old_comm = self.grouping.get_group(node);
         if new_community == old_comm {
             return N::zero();
         }
         
-        let total_weight = N::from(2.0).unwrap() * self.total_weight;
-        if total_weight == N::zero() {
+        let total_weight_2 = N::from(2.0).unwrap() * self.total_weight;
+        if total_weight_2 == N::zero() {
             return N::zero();
         }
 
-        let w_to_old = self.weight_to_comm(node, old_comm);
-        let w_from_old = w_to_old; // For undirected graphs
-
-        let w_to_new = self.weight_to_comm(node, new_community);
-        let w_from_new = w_to_new; // For undirected graphs
-
-        // Use CSRNetwork's cached strength instead of recomputing
-        let k_out = self.network.strength(node);
-        let k_in = k_out; // For undirected graphs
-
-        let self_weight = self.node_self_weight(node);
-
-        // Use uncached values since this is a const method
-        let K_out_old = self.compute_total_weight_from_comm_uncached(old_comm);
-        let K_in_old = K_out_old; // For undirected graphs
-
-        let K_out_new = self.compute_total_weight_from_comm_uncached(new_community) + k_out;
-        let K_in_new = K_out_new; // For undirected graphs
-
-        let diff_old = (w_to_old - self.resolution * k_out * K_in_old / total_weight)
-            + (w_from_old - self.resolution * k_in * K_out_old / total_weight);
-        let diff_new = (w_to_new + self_weight
-            - self.resolution * k_out * K_in_new / total_weight)
-            + (w_from_new + self_weight - self.resolution * k_in * K_out_new / total_weight);
-
+        let k = self.network.strength(node);
+        let self_weight = self.network.self_loop_weight(node);
+        
+        // Single-pass computation of weights
+        let (w_to_old, w_to_new) = self.network.weight_to_two_comms(node, old_comm, new_community, &self.grouping);
+        
+        // Compute community strengths on demand (optimized)
+        let K_old = self.compute_community_strength_fast(old_comm);
+        let K_new = self.compute_community_strength_fast(new_community);
+        
+        let resolution_over_total = self.resolution / total_weight_2;
+        
+        let diff_old = N::from(2.0).unwrap() * (w_to_old - resolution_over_total * k * K_old);
+        let diff_new = N::from(2.0).unwrap() * (w_to_new + self_weight - resolution_over_total * k * (K_new + k));
+        
         diff_new - diff_old
     }
 
@@ -280,6 +307,71 @@ where
     N: FloatOpsTS + 'static,
     G: NetworkGrouping,
 {
+
+    #[inline]
+    fn compute_community_strength_fast(&self, community: usize) -> N {
+        if community >= self.grouping.group_count() {
+            return N::zero();
+        }
+        
+        let members = &self.grouping.get_group_members()[community];
+        
+        // Use parallel processing for large communities only
+        if members.len() > 50 {
+            members.par_iter()
+                .map(|&node| self.network.strength(node))
+                .sum()
+        } else {
+            // Sequential for small communities to avoid overhead
+            members.iter()
+                .map(|&node| self.network.strength(node))
+                .fold(N::zero(), |acc, x| acc + x)
+        }
+    }
+
+    pub fn diff_move_optimized(&mut self, node: usize, new_community: usize) -> N {
+        let old_comm = self.grouping.get_group(node);
+        if new_community == old_comm {
+            return N::zero();
+        }
+        
+        let total_weight_2 = N::from(2.0).unwrap() * self.total_weight;
+        if total_weight_2 == N::zero() {
+            return N::zero();
+        }
+
+        // Ensure caches are up to date
+        self.update_community_caches();
+        
+        // Use CSRNetwork's optimized methods
+        let k = self.network.strength(node);
+        let self_weight = self.network.self_loop_weight(node);
+        
+        // Single-pass weight computation
+        let (w_to_old, w_to_new) = self.network.weight_to_two_comms(node, old_comm, new_community, &self.grouping);
+        
+        // Use cached community weights
+        let K_old = if old_comm < self.community_weights.len() {
+            self.community_weights[old_comm]
+        } else {
+            N::zero()
+        };
+        
+        let K_new = if new_community < self.community_weights.len() {
+            self.community_weights[new_community]
+        } else {
+            N::zero()
+        };
+        
+        // Optimized computation with pre-calculated terms
+        let resolution_over_total = self.resolution / total_weight_2;
+        
+        let diff_old = N::from(2.0).unwrap() * (w_to_old - resolution_over_total * k * K_old);
+        let diff_new = N::from(2.0).unwrap() * (w_to_new + self_weight - resolution_over_total * k * (K_new + k));
+        
+        diff_new - diff_old
+    }
+
     fn compute_total_weight_from_comm_uncached(&self, community: usize) -> N {
         if community >= self.grouping.group_count() {
             return N::zero();
