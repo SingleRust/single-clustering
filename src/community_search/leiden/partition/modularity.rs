@@ -128,7 +128,7 @@ where
     }
 
     fn quality(&self) -> N {
-        let total_weight = self.network.get_total_edge_weight_par(); // changed here
+        let total_weight = self.total_weight; // changed here
         if total_weight == N::zero() {
             return N::zero();
         }
@@ -158,7 +158,7 @@ where
             return N::zero();
         }
 
-        let total_weight = N::from(2.0).unwrap() * self.network.get_total_edge_weight_par();
+        let total_weight = N::from(2.0).unwrap() * self.total_weight;
         if total_weight == N::zero() {
             return N::zero();
         }
@@ -177,11 +177,11 @@ where
         let K_out_new = self.total_weight_from_comm(new_community) + k_out;
         let K_in_new = self.total_weight_to_comm(new_community) + k_in;
 
-        let diff_old = (w_to_old - k_out * K_in_old / total_weight)
-            + (w_from_old - k_in * K_out_old / total_weight);
+        let diff_old = (w_to_old - k_out*K_in_old/total_weight) + 
+               (w_from_old - k_in*K_out_old/total_weight);
 
-        let diff_new = (w_to_new + self_weight - k_out * K_in_new / total_weight)
-            + (w_from_new + self_weight - k_in * K_out_new / total_weight);
+        let diff_new = (w_to_new + self_weight - k_out*K_in_new/total_weight) + 
+               (w_from_new + self_weight - k_in*K_out_new/total_weight);
 
         let diff = diff_new - diff_old;
 
