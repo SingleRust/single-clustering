@@ -151,7 +151,7 @@ where
         q / m
     }
 
-    fn diff_move(&self, node: usize, new_community: usize) -> N {
+    fn diff_move(&mut self, node: usize, new_community: usize) -> N {
         let old_community = self.grouping.get_group(node);
         if new_community == old_community {
             return N::zero();

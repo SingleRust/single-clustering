@@ -457,30 +457,7 @@ where
         }
     }
 
-    #[inline]
-    pub fn neighbors_prefetch(&self, node: usize) -> CSRNeighborIterator<E> {
-        let start = self.node_ptrs[node];
-        let end = self.node_ptrs[node + 1];
-        
-        // Prefetch next cache lines for better performance
-        if end - start > 8 {
-            unsafe {
-                // Prefetch neighbors
-                let neighbors_ptr = self.neighbors.as_ptr().add(start + 8);
-                std::arch::x86_64::_mm_prefetch(neighbors_ptr as *const i8, std::arch::x86_64::_MM_HINT_T0);
-                
-                // Prefetch weights
-                let weights_ptr = self.weights.as_ptr().add(start + 8);
-                std::arch::x86_64::_mm_prefetch(weights_ptr as *const i8, std::arch::x86_64::_MM_HINT_T0);
-            }
-        }
-        
-        CSRNeighborIterator {
-            neighbor_ptr: unsafe { self.neighbors.as_ptr().add(start) },
-            weight_ptr: unsafe { self.weights.as_ptr().add(start) },
-            remaining: end - start,
-        }
-    }
+    
 }
 
 pub struct CSRNeighborIterator<E> {

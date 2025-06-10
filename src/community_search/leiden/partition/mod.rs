@@ -24,7 +24,7 @@ where
 
     fn quality(&self) -> N;
 
-    fn diff_move(&self, node: usize, new_community: usize) -> N;
+    fn diff_move(&mut self, node: usize, new_community: usize) -> N;
 
     fn network(&self) -> &CSRNetwork<N, N>;
 
