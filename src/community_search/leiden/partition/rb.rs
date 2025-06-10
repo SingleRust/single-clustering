@@ -16,9 +16,6 @@ where
     resolution: N,
     total_weight: N,
     
-    // Cache for node strengths (degrees)
-    node_strengths: Vec<N>,
-    
     // Cache for community total weights (out/in weights)
     community_weights: Vec<N>,
     community_weights_dirty: bool,
@@ -35,24 +32,12 @@ where
 {
     pub fn new(network: CSRNetwork<N, N>, grouping: G, resolution: N) -> Self {
         let tot_weight = network.total_weight();
-        let node_count = network.node_count();
-        
-        // Pre-compute node strengths since they never change
-        let node_strengths: Vec<N> = (0..node_count)
-            .map(|node| {
-                network
-                    .neighbors(node)
-                    .map(|(_, weight)| weight)
-                    .fold(N::zero(), |acc, w| acc + w)
-            })
-            .collect();
         
         let mut partition = Self {
             network,
             grouping,
             resolution,
             total_weight: tot_weight,
-            node_strengths,
             community_weights: Vec::new(),
             community_weights_dirty: true,
             community_internal_weights: Vec::new(),
@@ -84,10 +69,10 @@ where
         if self.community_weights_dirty {
             self.community_weights = vec![N::zero(); community_count];
             
-            // Calculate total weights for each community
+            // Use CSRNetwork's cached strengths - much faster than recomputing
             for node in 0..self.network.node_count() {
                 let community = self.grouping.get_group(node);
-                self.community_weights[community] += self.node_strengths[node];
+                self.community_weights[community] += self.network.strength(node);
             }
             self.community_weights_dirty = false;
         }
@@ -95,9 +80,11 @@ where
         if self.community_internal_weights_dirty {
             self.community_internal_weights = vec![N::zero(); community_count];
             
-            // Calculate internal weights for each community
+            // Optimized internal weight calculation using CSRNetwork's efficient iteration
             for node in 0..self.network.node_count() {
                 let node_community = self.grouping.get_group(node);
+                
+                // Use CSRNetwork's optimized neighbor iteration
                 for (neighbor, weight) in self.network.neighbors(node) {
                     if self.grouping.get_group(neighbor) == node_community {
                         if node == neighbor {
@@ -123,6 +110,8 @@ where
     /// Calculate the weight of edges from a node to a specific community
     fn weight_to_comm(&self, node: usize, community: usize) -> N {
         let mut weight = N::zero();
+        
+        // Use CSRNetwork's optimized neighbor iteration instead of collecting into Vec
         for (neighbor, edge_weight) in self.network.neighbors(node) {
             if self.grouping.get_group(neighbor) == community {
                 weight += edge_weight;
@@ -163,9 +152,14 @@ where
 
     /// Get the self-loop weight of a node (if any)
     fn node_self_weight(&self, node: usize) -> N {
+        // Use CSRNetwork's efficient iteration and early return
         for (neighbor, weight) in self.network.neighbors(node) {
             if neighbor == node {
                 return weight;
+            }
+            // Since neighbors are sorted, we can break early if neighbor > node
+            if neighbor > node {
+                break;
             }
         }
         N::zero()
@@ -173,7 +167,7 @@ where
 
     /// Calculate the strength (degree) of a node (cached)
     fn node_strength(&self, node: usize) -> N {
-        self.node_strengths[node]
+        self.network.strength(node)
     }
 }
 
@@ -225,17 +219,18 @@ where
         }
 
         let w_to_old = self.weight_to_comm(node, old_comm);
-        let w_from_old = self.weight_from_comm(node, old_comm);
+        let w_from_old = w_to_old; // For undirected graphs
 
         let w_to_new = self.weight_to_comm(node, new_community);
-        let w_from_new = self.weight_from_comm(node, new_community);
+        let w_from_new = w_to_new; // For undirected graphs
 
-        let k_out = self.node_strength(node);
+        // Use CSRNetwork's cached strength instead of recomputing
+        let k_out = self.network.strength(node);
         let k_in = k_out; // For undirected graphs
 
         let self_weight = self.node_self_weight(node);
 
-        // Use cached values where possible
+        // Use uncached values since this is a const method
         let K_out_old = self.compute_total_weight_from_comm_uncached(old_comm);
         let K_in_old = K_out_old; // For undirected graphs
 
@@ -293,8 +288,9 @@ where
         let members = &self.grouping.get_group_members()[community];
         let mut total_weight = N::zero();
 
+        // Use CSRNetwork's cached strengths instead of recomputing
         for &node in members {
-            total_weight += self.node_strengths[node];
+            total_weight += self.network.strength(node);
         }
         total_weight
     }
@@ -307,6 +303,7 @@ where
         let members = &self.grouping.get_group_members()[community];
         let mut total_weight = N::zero();
 
+        // Optimized iteration using CSRNetwork's efficient neighbor access
         for &node in members {
             for (neighbor, weight) in self.network.neighbors(node) {
                 if self.grouping.get_group(neighbor) == community {

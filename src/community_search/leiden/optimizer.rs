@@ -181,29 +181,69 @@ impl LeidenOptimizer {
         P: VertexPartition<N, G>,
     {
         let mut max_comm = v_comm;
+
+        // Pre-compute these values once instead of in the loop
+        let v_comm_size = partitions[0].csize(v_comm);
+        let epsilon_threshold = N::from(10.0).unwrap() * <N as Float>::epsilon();
+
         let mut max_improv = if let Some(max_size) = max_comm_size {
-            if max_size < partitions[0].csize(v_comm) {
+            if max_size < v_comm_size {
                 <N as Float>::neg_infinity()
             } else {
-                N::from(10.0).unwrap() * <N as Float>::epsilon()
+                epsilon_threshold
             }
         } else {
-            N::from(10.0).unwrap() * <N as Float>::epsilon()
+            epsilon_threshold
         };
 
-        let v_size = 1; // assuming unsit size
+        const V_SIZE: usize = 1; // Made it a const for better optimization
 
-        for &comm in comms {
-            if let Some(max_size) = max_comm_size {
-                if max_size < partitions[0].csize(comm) + v_size {
-                    continue;
-                }
+        // Early exit if no communities to check
+        if comms.is_empty() {
+            return Ok((max_comm, max_improv));
+        }
+
+        // Pre-filter communities by size constraint to avoid repeated checks
+        let valid_comms: Vec<usize> = if let Some(max_size) = max_comm_size {
+            comms
+                .iter()
+                .copied()
+                .filter(|&comm| partitions[0].csize(comm) + V_SIZE <= max_size)
+                .collect()
+        } else {
+            comms.to_vec()
+        };
+
+        // Early exit if no valid communities
+        if valid_comms.is_empty() {
+            return Ok((max_comm, max_improv));
+        }
+
+        if partitions.len() == 1 && layer_weights[0] == N::one() {
+        for &comm in &valid_comms {
+            let possible_improv = partitions[0].diff_move(v, comm);
+            if possible_improv > max_improv {
+                max_comm = comm;
+                max_improv = possible_improv;
             }
-
+        }
+    } else {
+        for &comm in &valid_comms {
             let mut possible_improv = N::zero();
-            for (layer, partition) in partitions.iter().enumerate() {
+            
+            for (layer_idx, partition) in partitions.iter().enumerate() {
                 let layer_improv = partition.diff_move(v, comm);
-                possible_improv += layer_weights[layer] * layer_improv;
+                possible_improv += layer_weights[layer_idx] * layer_improv;
+                
+                if possible_improv + epsilon_threshold < max_improv {
+                    let remaining_positive = layer_weights[layer_idx + 1..]
+                        .iter()
+                        .all(|&w| w >= N::zero());
+                    
+                    if remaining_positive && layer_improv <= N::zero() {
+                        break;
+                    }
+                }
             }
 
             if possible_improv > max_improv {
@@ -211,7 +251,9 @@ impl LeidenOptimizer {
                 max_improv = possible_improv;
             }
         }
-        Ok((max_comm, max_improv))
+    }
+    
+    Ok((max_comm, max_improv))
     }
 
     fn collect_candidate_communities<N, G, P>(
@@ -371,12 +413,12 @@ impl LeidenOptimizer {
         );
         let mut i: i32 = 0;
         while let Some(v) = vertex_order.pop_front() {
-            // println!(
-            //     "MOVE_NODES | Starting while loop | time: {:?} | iteration: {:?}, left: {:?}",
-            //     time.elapsed(),
-            //     i,
-            //     vertex_order.len()
-            // );
+            println!(
+                "MOVE_NODES | Starting while loop | time: {:?} | iteration: {:?}, left: {:?}",
+                time.elapsed(),
+                i,
+                vertex_order.len()
+            );
             let v_comm = partitions[0].membership(v);
             for &comm in &comms {
                 if comm < comm_added.len() {
@@ -385,11 +427,11 @@ impl LeidenOptimizer {
             }
             comms.clear();
 
-            // println!(
-            //     "MOVE_NODES | Basic setup done | time: {:?} | iteration: {:?}",
-            //     time.elapsed(),
-            //     i
-            // );
+            println!(
+                "MOVE_NODES | Basic setup done | time: {:?} | iteration: {:?}",
+                time.elapsed(),
+                i
+            );
 
             self.collect_candidate_communities(
                 v,
@@ -399,18 +441,18 @@ impl LeidenOptimizer {
                 &mut comm_added,
             );
 
-            //println!(
-            //    "MOVE_NODES | Found all candidates | time: {:?} | iteration: {:?}",
-            //    time.elapsed(),
-            //    i
-            //);
+            println!(
+               "MOVE_NODES | Found all candidates | time: {:?} | iteration: {:?}",
+               time.elapsed(),
+               i
+            );
 
             if consider_empty_community && partitions[0].cnodes(v_comm) > 1 {
-                //println!(
-                //    "MOVE_NODES | Considering empty move | time: {:?} | iteration: {:?}",
-                //    time.elapsed(),
-                //    i
-                //);
+                println!(
+                   "MOVE_NODES | Considering empty move | time: {:?} | iteration: {:?}",
+                   time.elapsed(),
+                   i
+                );
                 let n_comms_before = partitions[0].community_count();
                 let empty_comm = partitions[0].get_empty_community();
                 comms.push(empty_comm);
@@ -426,11 +468,11 @@ impl LeidenOptimizer {
                 }
             }
 
-            // println!(
-            //     "MOVE_NODES | Finsing best community move | time: {:?} | iteration: {:?}",
-            //     time.elapsed(),
-            //     i
-            // );
+            println!(
+                "MOVE_NODES | Finsing best community move | time: {:?} | iteration: {:?}",
+                time.elapsed(),
+                i
+            );
 
             let (max_comm, max_improv) = self.find_best_community_move(
                 v,
@@ -441,11 +483,11 @@ impl LeidenOptimizer {
                 max_comm_size,
             )?;
 
-            // println!(
-            //     "MOVE_NODES | Found best community move | time: {:?} | iteration: {:?}",
-            //     time.elapsed(),
-            //     i
-            // );
+            println!(
+                "MOVE_NODES | Found best community move | time: {:?} | iteration: {:?}",
+                time.elapsed(),
+                i
+            );
 
             is_node_stable[v] = true;
 
@@ -455,11 +497,11 @@ impl LeidenOptimizer {
                 for partition in partitions.iter_mut() {
                     partition.move_node(v, max_comm);
                 }
-                // println!(
-                //     "MOVE_NODES | Marking neighbors as unstable | time: {:?} | iteration: {:?}",
-                //     time.elapsed(),
-                //     i
-                // );
+                println!(
+                    "MOVE_NODES | Marking neighbors as unstable | time: {:?} | iteration: {:?}",
+                    time.elapsed(),
+                    i
+                );
                 self.mark_neighbors_unstable(
                     v,
                     max_comm,
@@ -938,9 +980,7 @@ impl LeidenOptimizer {
         let mut new_collapsed_partitions = Vec::new();
 
         for partition in collapsed_partitions {
-            let collapsed_network = partition
-                .network()
-                .aggregate(partition.grouping());
+            let collapsed_network = partition.network().aggregate(partition.grouping());
             let new_partition = partition.create_like(collapsed_network);
             new_collapsed_partitions.push(new_partition);
         }
