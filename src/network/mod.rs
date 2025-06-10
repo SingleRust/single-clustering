@@ -11,6 +11,9 @@ pub mod grouping;
 
 mod csr_network;
 
+pub use csr_network::CSRNetwork;
+pub use csr_network::CSRNeighborIterator;
+
 pub type Graph<N, E> = UnGraph<N, E>;
 
 #[derive(Clone)]

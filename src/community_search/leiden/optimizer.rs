@@ -4,12 +4,11 @@ use anyhow::Ok;
 use num_traits::Float;
 use rand::{Rng, SeedableRng, seq::SliceRandom};
 use rand_chacha::ChaCha8Rng;
-use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use single_utilities::traits::FloatOpsTS;
 
 use crate::{
     community_search::leiden::{ConsiderComms, LeidenConfig, partition::VertexPartition},
-    network::{Network, grouping::NetworkGrouping},
+    network::{CSRNetwork, grouping::NetworkGrouping},
 };
 
 #[derive(Debug, Clone)]
@@ -910,9 +909,9 @@ impl LeidenOptimizer {
         for layer in 0..nb_layers {
             let collapsed_network = collapsed_partitions[layer]
                 .network()
-                .create_reduced_network(sub_collapsed_partitions[layer].grouping());
+                .aggregate(sub_collapsed_partitions[layer].grouping());
             let refined_membership = sub_collapsed_partitions[layer].membership_vector();
-            let mut new_membership = vec![0; collapsed_network.nodes()];
+            let mut new_membership = vec![0; collapsed_network.node_count()];
 
             for v in 0..collapsed_partitions[layer].node_count() {
                 let refined_comm = refined_membership[v];
@@ -941,7 +940,7 @@ impl LeidenOptimizer {
         for partition in collapsed_partitions {
             let collapsed_network = partition
                 .network()
-                .create_reduced_network(partition.grouping());
+                .aggregate(partition.grouping());
             let new_partition = partition.create_like(collapsed_network);
             new_collapsed_partitions.push(new_partition);
         }
@@ -1172,7 +1171,7 @@ impl LeidenOptimizer {
         Ok(improvement)
     }
 
-    pub fn find_partition<N, G, P>(&mut self, network: Network<N, N>) -> anyhow::Result<P>
+    pub fn find_partition<N, G, P>(&mut self, network: CSRNetwork<N, N>) -> anyhow::Result<P>
     where
         N: FloatOpsTS + 'static,
         G: NetworkGrouping + Clone + Default,

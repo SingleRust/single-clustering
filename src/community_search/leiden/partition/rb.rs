@@ -2,7 +2,7 @@ use single_utilities::traits::FloatOpsTS;
 
 use crate::{
     community_search::leiden::partition::VertexPartition,
-    network::{Network, grouping::NetworkGrouping},
+    network::{grouping::NetworkGrouping, CSRNetwork},
 };
 
 #[derive(Clone)]
@@ -11,7 +11,7 @@ where
     N: FloatOpsTS + 'static,
     G: NetworkGrouping,
 {
-    network: Network<N, N>,
+    network: CSRNetwork<N, N>,
     grouping: G,
     resolution: N,
     total_weight: N,
@@ -33,9 +33,9 @@ where
     N: FloatOpsTS + 'static,
     G: NetworkGrouping,
 {
-    pub fn new(network: Network<N, N>, grouping: G, resolution: N) -> Self {
-        let tot_weight = network.get_total_edge_weight_par();
-        let node_count = network.nodes();
+    pub fn new(network: CSRNetwork<N, N>, grouping: G, resolution: N) -> Self {
+        let tot_weight = network.total_weight();
+        let node_count = network.node_count();
         
         // Pre-compute node strengths since they never change
         let node_strengths: Vec<N> = (0..node_count)
@@ -64,8 +64,8 @@ where
         partition
     }
 
-    pub fn new_singleton(network: Network<N, N>, resolution: N) -> Self {
-        let grouping = G::create_isolated(network.nodes());
+    pub fn new_singleton(network: CSRNetwork<N, N>, resolution: N) -> Self {
+        let grouping = G::create_isolated(network.node_count());
         Self::new(network, grouping, resolution)
     }
 
@@ -85,7 +85,7 @@ where
             self.community_weights = vec![N::zero(); community_count];
             
             // Calculate total weights for each community
-            for node in 0..self.network.nodes() {
+            for node in 0..self.network.node_count() {
                 let community = self.grouping.get_group(node);
                 self.community_weights[community] += self.node_strengths[node];
             }
@@ -96,7 +96,7 @@ where
             self.community_internal_weights = vec![N::zero(); community_count];
             
             // Calculate internal weights for each community
-            for node in 0..self.network.nodes() {
+            for node in 0..self.network.node_count() {
                 let node_community = self.grouping.get_group(node);
                 for (neighbor, weight) in self.network.neighbors(node) {
                     if self.grouping.get_group(neighbor) == node_community {
@@ -182,12 +182,12 @@ where
     N: FloatOpsTS + 'static,
     G: NetworkGrouping + Clone + Default,
 {
-    fn create_partition(network: Network<N, N>) -> Self {
-        let node_count = network.nodes();
+    fn create_partition(network: CSRNetwork<N, N>) -> Self {
+        let node_count = network.node_count();
         Self::new(network, G::create_isolated(node_count), N::one())
     }
 
-    fn create_with_membership(network: Network<N, N>, membership: &[usize]) -> Self {
+    fn create_with_membership(network: CSRNetwork<N, N>, membership: &[usize]) -> Self {
         Self::new(network, G::from_assignments(membership), N::one())
     }
 
@@ -251,7 +251,7 @@ where
         diff_new - diff_old
     }
 
-    fn network(&self) -> &Network<N, N> {
+    fn network(&self) -> &CSRNetwork<N, N> {
         &self.network
     }
 
@@ -270,11 +270,11 @@ where
         }
     }
     
-    fn create_like(&self, network: Network<N, N>) -> Self {
+    fn create_like(&self, network: CSRNetwork<N, N>) -> Self {
         Self::with_resolution(network, self.resolution)
     }
     
-    fn create_like_with_membership(&self, network: Network<N, N>, membership: &[usize]) -> Self {
+    fn create_like_with_membership(&self, network: CSRNetwork<N, N>, membership: &[usize]) -> Self {
         Self::with_membership_and_resolution(network, membership, self.resolution)
     }
 }
@@ -329,14 +329,14 @@ where
     G: NetworkGrouping + Clone + Default,
 {
     /// Create RB partition with specified resolution parameter
-    pub fn with_resolution(network: Network<N, N>, resolution: N) -> Self {
-        let node_count = network.nodes();
+    pub fn with_resolution(network: CSRNetwork<N, N>, resolution: N) -> Self {
+        let node_count = network.node_count();
         Self::new(network, G::create_isolated(node_count), resolution)
     }
 
     /// Create RB partition with specified membership and resolution
     pub fn with_membership_and_resolution(
-        network: Network<N, N>,
+        network: CSRNetwork<N, N>,
         membership: &[usize],
         resolution: N,
     ) -> Self {
