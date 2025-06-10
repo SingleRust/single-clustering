@@ -88,7 +88,10 @@ where
         for (row, col, &weight) in matrix.triplet_iter() {
             if weight != E::zero() {
                 // Only add upper triangle for undirected graphs to avoid duplicates
-                if row <= col {
+                if row == col {
+                    let tot_w = E::from(2.0).unwrap() * weight;
+                    edges.push((row, col, tot_w));
+                } else if row < col {
                     edges.push((row, col, weight));
                 }
             }
@@ -165,35 +168,51 @@ where
 
     pub fn aggregate<G: NetworkGrouping>(&self, grouping: &G) -> Self {
         let new_node_count = grouping.group_count();
-
-        let mut edge_map: HashMap<(usize, usize), E> = HashMap::new();
+        
         let mut new_node_weights = vec![N::zero(); new_node_count];
-
+        
         for node in 0..self.node_count() {
             let group = grouping.get_group(node);
             new_node_weights[group] += self.node_weights[node];
         }
-
+        
+        let mut edge_memo = HashMap::new();
+        let mut self_loop_weights = HashMap::new();
+        
         for node in 0..self.node_count() {
-            let from_group = grouping.get_group(node);
-
-            for (neighbor, weight) in self.neighbors(node) {
-                let to_group = grouping.get_group(neighbor);
-
-                let edge_key = if from_group <= to_group {
-                    (from_group, to_group)
-                } else {
-                    (to_group, from_group)
-                };
-
-                *edge_map.entry(edge_key).or_insert(E::zero()) += weight;
+            let start = self.node_ptrs[node];
+            let end = self.node_ptrs[node + 1];
+            
+            for i in start..end {
+                let neighbor = self.neighbors[i];
+                let weight = self.weights[i];
+                
+                if node <= neighbor {
+                    let g1 = grouping.get_group(node);
+                    let g2 = grouping.get_group(neighbor);
+                    
+                    if g1 == g2 {
+                        *self_loop_weights.entry(g1).or_insert(E::zero()) += weight;
+                    } else {
+                        let (min_g, max_g) = if g1 < g2 { (g1, g2) } else { (g2, g1) };
+                        *edge_memo.entry((min_g, max_g)).or_insert(E::zero()) += weight;
+                    }
+                }
             }
         }
-
-        let edges: Vec<_> = edge_map
-            .into_iter()
-            .map(|((from, to), weight)| (from, to, weight))
-            .collect();
+        
+        let mut edges = Vec::new();
+        
+        for (&group, &weight) in self_loop_weights.iter() {
+            if weight > E::zero() {
+                edges.push((group, group, weight));
+            }
+        }
+        
+        for (&(g1, g2), &weight) in edge_memo.iter() {
+            edges.push((g1, g2, weight));
+        }
+        
         Self::from_edges(&edges, new_node_weights)
     }
 
