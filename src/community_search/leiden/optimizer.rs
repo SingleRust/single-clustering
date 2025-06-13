@@ -1097,7 +1097,7 @@ where
         }
 
         // Initialize collapsed structures - start with original partitions
-        let mut collapsed_partitions: Vec<P> = partitions.iter().cloned().collect();
+        let mut collapsed_partitions: Vec<P> = partitions.to_vec();
         let mut is_collapsed_membership_fixed = is_membership_fixed.to_vec();
         let mut aggregate_node_per_individual_node: Vec<usize> = (0..n).collect();
         let mut is_first_iteration = true;
