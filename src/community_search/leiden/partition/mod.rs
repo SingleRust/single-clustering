@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use single_utilities::traits::FloatOpsTS;
 
-use crate::network::{grouping::NetworkGrouping, Network};
+use crate::network::{grouping::NetworkGrouping, CSRNetwork};
 
 mod modularity;
 pub use modularity::ModularityPartition;
@@ -14,19 +14,19 @@ where
     N: FloatOpsTS + 'static,
     G: NetworkGrouping,
 {
-    fn create_partition(network: Network<N, N>) -> Self;
+    fn create_partition(network: CSRNetwork<N, N>) -> Self;
 
-    fn create_with_membership(network: Network<N, N>, membership: &[usize]) -> Self;
+    fn create_with_membership(network: CSRNetwork<N, N>, membership: &[usize]) -> Self;
 
-    fn create_like(&self, network: Network<N, N>) -> Self;
+    fn create_like(&self, network: CSRNetwork<N, N>) -> Self;
 
-    fn create_like_with_membership(&self, network: Network<N, N>, membership: &[usize]) -> Self;
+    fn create_like_with_membership(&self, network: CSRNetwork<N, N>, membership: &[usize]) -> Self;
 
     fn quality(&self) -> N;
 
-    fn diff_move(&self, node: usize, new_community: usize) -> N;
+    fn diff_move(&mut self, node: usize, new_community: usize) -> N;
 
-    fn network(&self) -> &Network<N, N>;
+    fn network(&self) -> &CSRNetwork<N, N>;
 
     fn grouping(&self) -> &G;
 
@@ -51,7 +51,7 @@ where
     }
 
     fn node_count(&self) -> usize {
-        self.network().nodes()
+        self.network().node_count()
     }
 
     fn community_count(&self) -> usize {

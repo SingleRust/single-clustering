@@ -2,7 +2,7 @@ use single_utilities::traits::FloatOpsTS;
 
 use crate::{
     community_search::leiden::partition::VertexPartition,
-    network::{Network, grouping::NetworkGrouping},
+    network::{grouping::NetworkGrouping, CSRNetwork},
 };
 
 #[derive(Clone)]
@@ -11,17 +11,18 @@ where
     N: FloatOpsTS + 'static,
     G: NetworkGrouping,
 {
-    network: Network<N, N>,
+    network: CSRNetwork<N, N>,
     grouping: G,
     resolution: N,
     total_weight: N,
+    two_m: N, // Pre-computed 2*total_weight
     
-    // Cache for node strengths (degrees)
+    // Cache for node strengths (degrees) - never changes
     node_strengths: Vec<N>,
     
-    // Cache for community total weights (out/in weights)
-    community_weights: Vec<N>,
-    community_weights_dirty: bool,
+    // Cache for community strengths - updated when communities change
+    community_strengths: Vec<N>,
+    community_strengths_dirty: bool,
     
     // Cache for community internal weights
     community_internal_weights: Vec<N>,
@@ -33,18 +34,14 @@ where
     N: FloatOpsTS + 'static,
     G: NetworkGrouping,
 {
-    pub fn new(network: Network<N, N>, grouping: G, resolution: N) -> Self {
-        let tot_weight = network.get_total_edge_weight_par();
-        let node_count = network.nodes();
+    pub fn new(network: CSRNetwork<N, N>, grouping: G, resolution: N) -> Self {
+        let tot_weight = network.total_weight();
+        let two_m = N::from(2.0).unwrap() * tot_weight;
+        let node_count = network.node_count();
         
         // Pre-compute node strengths since they never change
         let node_strengths: Vec<N> = (0..node_count)
-            .map(|node| {
-                network
-                    .neighbors(node)
-                    .map(|(_, weight)| weight)
-                    .fold(N::zero(), |acc, w| acc + w)
-            })
+            .map(|node| network.strength(node))  // Use the cached strength from CSRNetwork
             .collect();
         
         let mut partition = Self {
@@ -52,9 +49,10 @@ where
             grouping,
             resolution,
             total_weight: tot_weight,
+            two_m,
             node_strengths,
-            community_weights: Vec::new(),
-            community_weights_dirty: true,
+            community_strengths: Vec::new(),
+            community_strengths_dirty: true,
             community_internal_weights: Vec::new(),
             community_internal_weights_dirty: true,
         };
@@ -64,8 +62,8 @@ where
         partition
     }
 
-    pub fn new_singleton(network: Network<N, N>, resolution: N) -> Self {
-        let grouping = G::create_isolated(network.nodes());
+    pub fn new_singleton(network: CSRNetwork<N, N>, resolution: N) -> Self {
+        let grouping = G::create_isolated(network.node_count());
         Self::new(network, grouping, resolution)
     }
 
@@ -73,30 +71,42 @@ where
         self.grouping
     }
     
-    /// Update community weight caches when needed
+    /// Update community caches when needed - optimized for performance
+    #[inline]
     fn update_community_caches(&mut self) {
-        if !self.community_weights_dirty && !self.community_internal_weights_dirty {
-            return;
-        }
-        
         let community_count = self.grouping.group_count();
         
-        if self.community_weights_dirty {
-            self.community_weights = vec![N::zero(); community_count];
-            
-            // Calculate total weights for each community
-            for node in 0..self.network.nodes() {
-                let community = self.grouping.get_group(node);
-                self.community_weights[community] += self.node_strengths[node];
+        if self.community_strengths_dirty {
+            // Resize and zero out the community strengths vector
+            if self.community_strengths.len() != community_count {
+                self.community_strengths.resize(community_count, N::zero());
+            } else {
+                // Fast zero-out for existing vector
+                for strength in &mut self.community_strengths {
+                    *strength = N::zero();
+                }
             }
-            self.community_weights_dirty = false;
+            
+            // Calculate total strengths for each community
+            for node in 0..self.network.node_count() {
+                let community = self.grouping.get_group(node);
+                self.community_strengths[community] += self.node_strengths[node];
+            }
+            self.community_strengths_dirty = false;
         }
         
         if self.community_internal_weights_dirty {
-            self.community_internal_weights = vec![N::zero(); community_count];
+            // Resize and zero out
+            if self.community_internal_weights.len() != community_count {
+                self.community_internal_weights.resize(community_count, N::zero());
+            } else {
+                for weight in &mut self.community_internal_weights {
+                    *weight = N::zero();
+                }
+            }
             
             // Calculate internal weights for each community
-            for node in 0..self.network.nodes() {
+            for node in 0..self.network.node_count() {
                 let node_community = self.grouping.get_group(node);
                 for (neighbor, weight) in self.network.neighbors(node) {
                     if self.grouping.get_group(neighbor) == node_community {
@@ -115,14 +125,17 @@ where
     }
     
     /// Mark caches as dirty when community structure changes
+    #[inline]
     fn invalidate_caches(&mut self) {
-        self.community_weights_dirty = true;
+        self.community_strengths_dirty = true;
         self.community_internal_weights_dirty = true;
     }
 
-    /// Calculate the weight of edges from a node to a specific community
+    /// Fast weight calculation from node to community
+    #[inline]
     fn weight_to_comm(&self, node: usize, community: usize) -> N {
         let mut weight = N::zero();
+        // Use iterator directly to avoid function call overhead
         for (neighbor, edge_weight) in self.network.neighbors(node) {
             if self.grouping.get_group(neighbor) == community {
                 weight += edge_weight;
@@ -131,47 +144,25 @@ where
         weight
     }
 
-    /// For undirected graphs, weight_from_comm is the same as weight_to_comm
-    fn weight_from_comm(&self, node: usize, community: usize) -> N {
-        self.weight_to_comm(node, community)
-    }
-
-    /// Calculate total weight of edges going out from all nodes in a community (cached)
-    fn total_weight_from_comm(&mut self, community: usize) -> N {
-        if community >= self.grouping.group_count() {
-            return N::zero();
+    /// Get cached community strength (fast lookup)
+    #[inline]
+    fn get_community_strength(&self, community: usize) -> N {
+        if community < self.community_strengths.len() {
+            self.community_strengths[community]
+        } else {
+            N::zero()
         }
-        
-        self.update_community_caches();
-        self.community_weights[community]
     }
 
-    /// For undirected graphs, total_weight_to_comm is the same as total_weight_from_comm
-    fn total_weight_to_comm(&mut self, community: usize) -> N {
-        self.total_weight_from_comm(community)
-    }
-
-    /// Calculate total weight of edges within a community (cached)
-    fn total_weight_in_comm(&mut self, community: usize) -> N {
-        if community >= self.grouping.group_count() {
-            return N::zero();
-        }
-        
-        self.update_community_caches();
-        self.community_internal_weights[community]
-    }
-
-    /// Get the self-loop weight of a node (if any)
+    /// Get the self-loop weight of a node (optimized)
+    #[inline]
     fn node_self_weight(&self, node: usize) -> N {
-        for (neighbor, weight) in self.network.neighbors(node) {
-            if neighbor == node {
-                return weight;
-            }
-        }
-        N::zero()
+        // Use the optimized method from CSRNetwork
+        self.network.self_loop_weight(node)
     }
 
-    /// Calculate the strength (degree) of a node (cached)
+    /// Calculate the strength (degree) of a node (cached lookup)
+    #[inline]
     fn node_strength(&self, node: usize) -> N {
         self.node_strengths[node]
     }
@@ -182,76 +173,40 @@ where
     N: FloatOpsTS + 'static,
     G: NetworkGrouping + Clone + Default,
 {
-    fn create_partition(network: Network<N, N>) -> Self {
-        let node_count = network.nodes();
+    fn create_partition(network: CSRNetwork<N, N>) -> Self {
+        let node_count = network.node_count();
         Self::new(network, G::create_isolated(node_count), N::one())
     }
 
-    fn create_with_membership(network: Network<N, N>, membership: &[usize]) -> Self {
+    fn create_with_membership(network: CSRNetwork<N, N>, membership: &[usize]) -> Self {
         Self::new(network, G::from_assignments(membership), N::one())
     }
 
     /// Calculate the RB quality function
     fn quality(&self) -> N {
-        // We need a mutable reference for caching, but quality should be const
-        // For now, we'll compute without caching in this method
-        let mut modularity = N::zero();
-        let m = N::from(4.0).unwrap() * self.total_weight;
+        let mut quality_sum = N::zero();
 
-        if m == N::zero() {
+        if self.two_m == N::zero() {
             return N::zero();
         }
 
         for c in 0..self.community_count() {
-            // Compute without cache for const method
-            let w = self.compute_total_weight_in_comm_uncached(c);
-            let w_out = self.compute_total_weight_from_comm_uncached(c);
-            let w_in = w_out; // For undirected graphs
-            modularity += w - self.resolution * w_out * w_in / m;
-        }
-        N::from(2.0).unwrap() * modularity
-    }
-
-    /// Calculate the difference in quality when moving a node to a new community
-    fn diff_move(&self, node: usize, new_community: usize) -> N {
-        let old_comm = self.membership(node);
-        if new_community == old_comm {
-            return N::zero();
+            let w_in = self.compute_total_weight_in_comm_uncached(c);
+            let k_c = self.compute_total_weight_from_comm_uncached(c);
+            
+            // RB quality: w_in - γ * k_c² / (2m)
+            quality_sum += w_in - self.resolution * k_c * k_c / self.two_m;
         }
         
-        let total_weight = N::from(2.0).unwrap() * self.total_weight;
-        if total_weight == N::zero() {
-            return N::zero();
-        }
-
-        let w_to_old = self.weight_to_comm(node, old_comm);
-        let w_from_old = self.weight_from_comm(node, old_comm);
-
-        let w_to_new = self.weight_to_comm(node, new_community);
-        let w_from_new = self.weight_from_comm(node, new_community);
-
-        let k_out = self.node_strength(node);
-        let k_in = k_out; // For undirected graphs
-
-        let self_weight = self.node_self_weight(node);
-
-        // Use cached values where possible
-        let K_out_old = self.compute_total_weight_from_comm_uncached(old_comm);
-        let K_in_old = K_out_old; // For undirected graphs
-
-        let K_out_new = self.compute_total_weight_from_comm_uncached(new_community) + k_out;
-        let K_in_new = K_out_new; // For undirected graphs
-
-        let diff_old = (w_to_old - self.resolution * k_out * K_in_old / total_weight)
-            + (w_from_old - self.resolution * k_in * K_out_old / total_weight);
-        let diff_new = (w_to_new + self_weight
-            - self.resolution * k_out * K_in_new / total_weight)
-            + (w_from_new + self_weight - self.resolution * k_in * K_out_new / total_weight);
-
-        diff_new - diff_old
+        quality_sum
     }
 
-    fn network(&self) -> &Network<N, N> {
+    /// Fixed diff_move calculation - this was the main issue
+    fn diff_move(&mut self, node: usize, new_community: usize) -> N {
+        self.diff_move_cached(node, new_community)
+    }
+
+    fn network(&self) -> &CSRNetwork<N, N> {
         &self.network
     }
 
@@ -263,6 +218,7 @@ where
         &mut self.grouping
     }
     
+    #[inline]
     fn move_node(&mut self, node: usize, new_community: usize) {
         if self.grouping.get_group(node) != new_community {
             self.grouping.set_group(node, new_community);
@@ -270,11 +226,11 @@ where
         }
     }
     
-    fn create_like(&self, network: Network<N, N>) -> Self {
+    fn create_like(&self, network: CSRNetwork<N, N>) -> Self {
         Self::with_resolution(network, self.resolution)
     }
     
-    fn create_like_with_membership(&self, network: Network<N, N>, membership: &[usize]) -> Self {
+    fn create_like_with_membership(&self, network: CSRNetwork<N, N>, membership: &[usize]) -> Self {
         Self::with_membership_and_resolution(network, membership, self.resolution)
     }
 }
@@ -285,6 +241,40 @@ where
     N: FloatOpsTS + 'static,
     G: NetworkGrouping,
 {
+    /// Optimized diff_move that uses cached values when mutable reference is available
+    pub fn diff_move_cached(&mut self, node: usize, new_community: usize) -> N {
+        let old_comm = self.grouping.get_group(node);
+        if new_community == old_comm {
+            return N::zero();
+        }
+        
+        if self.two_m == N::zero() {
+            return N::zero();
+        }
+
+        // Ensure community strengths are up to date
+        self.update_community_caches();
+
+        let k_i = self.node_strengths[node];
+        let self_weight = self.node_self_weight(node);
+        
+        // Calculate weights to old and new communities
+        let w_to_old = self.weight_to_comm(node, old_comm);
+        let w_to_new = self.weight_to_comm(node, new_community);
+
+        // Use cached community strengths
+        let k_old = self.get_community_strength(old_comm);
+        let k_new = self.get_community_strength(new_community);
+
+        let delta_w_in = (w_to_new + self_weight) - w_to_old;
+        
+        // Optimized delta k² calculation
+        let delta_k_squared = N::from(2.0).unwrap() * k_i * (k_new - k_old + k_i);
+        let delta_null_model = self.resolution * delta_k_squared / self.two_m;
+
+        delta_w_in - delta_null_model
+    }
+
     fn compute_total_weight_from_comm_uncached(&self, community: usize) -> N {
         if community >= self.grouping.group_count() {
             return N::zero();
@@ -312,7 +302,7 @@ where
                 if self.grouping.get_group(neighbor) == community {
                     if node == neighbor {
                         total_weight += weight;
-                    } else if node <= neighbor {
+                    } else if node < neighbor {
                         total_weight += weight;
                     }
                 }
@@ -329,14 +319,14 @@ where
     G: NetworkGrouping + Clone + Default,
 {
     /// Create RB partition with specified resolution parameter
-    pub fn with_resolution(network: Network<N, N>, resolution: N) -> Self {
-        let node_count = network.nodes();
+    pub fn with_resolution(network: CSRNetwork<N, N>, resolution: N) -> Self {
+        let node_count = network.node_count();
         Self::new(network, G::create_isolated(node_count), resolution)
     }
 
     /// Create RB partition with specified membership and resolution
     pub fn with_membership_and_resolution(
-        network: Network<N, N>,
+        network: CSRNetwork<N, N>,
         membership: &[usize],
         resolution: N,
     ) -> Self {
@@ -351,5 +341,23 @@ where
     /// Set a new resolution parameter
     pub fn set_resolution(&mut self, resolution: N) {
         self.resolution = resolution;
+    }
+
+    /// Get the membership of a node
+    #[inline]
+    pub fn membership(&self, node: usize) -> usize {
+        self.grouping.get_group(node)
+    }
+
+    /// Get the community count
+    #[inline]
+    pub fn community_count(&self) -> usize {
+        self.grouping.group_count()
+    }
+
+    /// Get the node count
+    #[inline]
+    pub fn node_count(&self) -> usize {
+        self.network.node_count()
     }
 }
