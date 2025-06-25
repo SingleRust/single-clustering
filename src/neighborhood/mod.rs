@@ -1,4 +1,3 @@
-use ball_tree::{BallTree, Point};
 use hnsw_rs::{
     hnsw::{Hnsw, Neighbour},
     prelude::DistL2,
