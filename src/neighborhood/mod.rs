@@ -288,6 +288,7 @@ pub fn get_optimal_hnsw_params(n_samples: usize, k: usize) -> (usize, usize, usi
         n if n < 10_000 => 100,
         n if n < 100_000 => 200,
         n if n < 1_000_000 => 200,
+        n if n < 2_500_000 => 300,
         _ => 400,
     };
 
@@ -516,4 +517,39 @@ where
         distances,
         connectivities,
     })
+}
+
+pub fn knn_arrayd_adaptive<T, const K: usize, D>(
+    data: ArrayViewD<T>,
+    k: u64,
+) -> anyhow::Result<NeighborResult<T>>
+where
+    T: FloatOpsTS + Send + Sync + 'static,
+    D: DistanceMetric<T, K>,
+    hnsw_rs::prelude::DistL2: hnsw_rs::prelude::Distance<T>,
+{
+    if data.ndim() != 2 {
+        return Err(anyhow::anyhow!("The input array must have two dimensions."));
+    }
+
+    let shape = data.shape();
+    let n_samples = shape[0];
+
+    const HNSW_THRESHOLD: usize = 250_000;
+
+    println!(
+        "Dataset has {} samples. Using {} for KNN search.",
+        n_samples,
+        if n_samples > HNSW_THRESHOLD {
+            "HNSW"
+        } else {
+            "KD-tree"
+        }
+    );
+
+    if n_samples > HNSW_THRESHOLD {
+        knn_arrayd_hnswlib_gaussian::<T, K>(data, k)
+    } else {
+        knn_arrayd_kiddo_gaussian::<T, K, D>(data, k)
+    }
 }
