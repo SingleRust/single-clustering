@@ -166,6 +166,7 @@ where
     fn node_strength(&self, node: usize) -> N {
         self.node_strengths[node]
     }
+
 }
 
 impl<N, G> VertexPartition<N, G> for RBConfigurationPartition<N, G>
@@ -205,6 +206,8 @@ where
     fn diff_move(&mut self, node: usize, new_community: usize) -> N {
         self.diff_move_cached(node, new_community)
     }
+
+
 
     fn network(&self) -> &CSRNetwork<N, N> {
         &self.network
