@@ -1,3 +1,15 @@
+//! # Network Module
+//!
+//! This module provides network/graph representations and operations for clustering algorithms.
+//! It includes both petgraph-based and CSR-based implementations, with support for network
+//! aggregation, subgraph extraction, and format conversions.
+//!
+//! ## Key Components
+//! - `Network<N, E>` - Petgraph-based network representation
+//! - `CSRNetwork<N, E>` - High-performance CSR-based network
+//! - Network grouping and community operations
+//! - Matrix format conversions (CSR, COO)
+
 use crate::network::grouping::NetworkGrouping;
 use nalgebra_sparse::{CooMatrix, CsrMatrix};
 use petgraph::graph::{Edges, UnGraph};
@@ -14,13 +26,27 @@ mod csr_network;
 pub use csr_network::CSRNetwork;
 pub use csr_network::CSRNeighborIterator;
 
+/// Type alias for the underlying petgraph UnGraph structure.
 pub type Graph<N, E> = UnGraph<N, E>;
 
+/// A network representation based on petgraph's UnGraph.
+///
+/// This structure provides a convenient wrapper around petgraph's undirected graph
+/// with additional methods for clustering operations and format conversions.
+///
+/// # Type Parameters
+/// * `N` - Node weight type (e.g., f32, f64)
+/// * `E` - Edge weight type (e.g., f32, f64)
 #[derive(Clone)]
 pub struct Network<N, E> {
+    /// The underlying petgraph undirected graph
     pub graph: Graph<N, E>,
 }
 
+/// Iterator over neighbors and their edge weights for a specific node.
+///
+/// Provides efficient iteration over the neighbors of a node in the petgraph
+/// representation, yielding (neighbor_index, edge_weight) pairs.
 pub struct NeighborAndWeightIterator<'a, N: 'a, E: 'a> {
     edge_iter: Edges<'a, E, petgraph::Undirected>,
     home_node: usize,
@@ -60,20 +86,24 @@ where
     N: FloatOpsTS,
     E: FloatOpsTS + 'static,
 {
+    /// Creates a new empty network.
     pub fn new() -> Self {
         Network {
             graph: Graph::new_undirected(),
         }
     }
 
+    /// Creates a network from an existing petgraph Graph.
     pub fn new_from_graph(graph: Graph<N, E>) -> Self {
         Network { graph }
     }
 
+    /// Returns the number of nodes in the network.
     pub fn nodes(&self) -> usize {
         self.graph.node_count()
     }
 
+    /// Returns the weight of a specific node.
     pub fn weight(&self, node: usize) -> N {
         *self
             .graph
@@ -81,6 +111,7 @@ where
             .unwrap()
     }
 
+    /// Returns an iterator over the neighbors and edge weights of a node.
     pub fn neighbors(&self, node: usize) -> NeighborAndWeightIterator<'_, N, E> {
         NeighborAndWeightIterator {
             edge_iter: self.graph.edges(petgraph::graph::NodeIndex::new(node)),
@@ -89,18 +120,21 @@ where
         }
     }
 
+    /// Calculates the total weight of all nodes in the network.
     pub fn get_total_node_weight(&self) -> N {
         self.graph
             .node_weights()
             .fold(N::zero(), |sum, node| sum + *node)
     }
 
+    /// Calculates the total weight of all edges in the network.
     pub fn get_total_edge_weight(&self) -> E {
         self.graph
             .edge_weights()
             .fold(E::zero(), |sum, edge| sum + *edge)
     }
 
+    /// Calculates the total edge weight using parallel processing.
     pub fn get_total_edge_weight_par(&self) -> E {
         let weights: Vec<_> = self.graph.edge_weights().collect();
         weights
@@ -109,6 +143,7 @@ where
             .sum()
     }
 
+    /// Computes total edge weights per node and stores results in the provided vector.
     pub fn get_total_edge_weight_per_node(&self, result: &mut Vec<E>) {
         result.clear();
         result.extend((0..self.nodes()).map(|i| {
@@ -118,6 +153,10 @@ where
         }));
     }
 
+    /// Creates a reduced network by aggregating nodes according to a grouping.
+    ///
+    /// Nodes in the same group are merged into super-nodes, with edge weights
+    /// combined appropriately. Used in multilevel clustering algorithms.
     pub fn create_reduced_network<T: NetworkGrouping>(&self, grouping: &T) -> Self {
         let mut cluster_g =
             Graph::with_capacity(grouping.group_count(), grouping.group_count() * 2);
@@ -162,6 +201,10 @@ where
         Network { graph: cluster_g }
     }
 
+    /// Creates separate subnetworks for each group in the grouping.
+    ///
+    /// Returns a vector of networks, one for each group, containing only
+    /// the nodes and edges within that group.
     pub fn create_subnetworks<T: NetworkGrouping>(&self, grouping: &T) -> Vec<Self> {
         let mut graphs = vec![Graph::new_undirected(); grouping.group_count()];
         let mut new_id_map = vec![0; self.nodes()];
@@ -198,6 +241,10 @@ where
             .collect::<Vec<_>>()
     }
 
+    /// Creates a subnetwork containing only nodes from a specific group.
+    ///
+    /// Extracts all nodes belonging to the specified group and their
+    /// internal connections, renumbering nodes consecutively.
     pub fn create_subnetwork_from_group<T: NetworkGrouping>(
         &self,
         grouping: &T,
@@ -227,6 +274,10 @@ where
         Network { graph: subgraph }
     }
 
+    /// Converts the network to an upper triangular CSR matrix representation.
+    ///
+    /// Only includes edges where row <= column to avoid duplication in
+    /// undirected graphs.
     pub fn to_upper_triangular_csr(&self) -> CsrMatrix<E> {
         let n_nodes = self.nodes();
         let mut triplets = Vec::new();
@@ -247,6 +298,10 @@ where
             .expect("Failed to create CSR matrix from network")
     }
 
+    /// Converts the network to a full CSR matrix representation.
+    ///
+    /// Includes all edges in the undirected graph, creating a symmetric
+    /// matrix suitable for linear algebra operations.
     pub fn to_csr_matrix(&self) -> CsrMatrix<E> {
         let n_nodes = self.nodes();
         let estimated_edges = self.graph.edge_count();
@@ -275,6 +330,10 @@ where
     }
 }
 
+/// Creates a Network from a CSR matrix representation.
+///
+/// Converts a nalgebra CSR matrix to a petgraph-based Network, computing
+/// node weights from row sums and handling self-loops appropriately.
 pub fn network_from_csr_matrix<T>(csr_matrix: CsrMatrix<T>) -> Network<T, T>
 where
     T: FloatOpsTS + 'static,
@@ -305,6 +364,11 @@ where
     Network::new_from_graph(graph)
 }
 
+/// Converts a CSR matrix and node weights to a petgraph Graph.
+///
+/// Creates a petgraph undirected graph from CSR matrix data, handling
+/// upper triangular representation to avoid edge duplication.
+#[allow(dead_code)]
 fn csr_to_petgraph<T>(connectivity: CsrMatrix<T>, node_weights: Vec<T>) -> Graph<T, T>
 where
     T: FloatOpsTS,

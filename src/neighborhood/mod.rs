@@ -1,3 +1,15 @@
+//! # Neighborhood Module
+//!
+//! This module provides K-nearest neighbor (KNN) algorithms with Gaussian connectivity weighting
+//! for clustering applications. It supports both KD-tree and HNSW-based approaches depending
+//! on dataset size.
+//!
+//! ## Key Features
+//! - Adaptive algorithm selection (KD-tree for small datasets, HNSW for large datasets)
+//! - Gaussian connectivity weighting for community detection
+//! - Parallel processing with optimized memory usage
+//! - CSR matrix output format for efficient sparse matrix operations
+
 use hnsw_rs::{
     hnsw::{Hnsw, Neighbour},
     prelude::DistL2,
@@ -9,11 +21,33 @@ use rayon::prelude::*;
 use single_utilities::traits::FloatOpsTS;
 use std::time::Instant;
 
+/// Result structure containing distance and connectivity matrices from KNN computation.
+///
+/// The distances matrix contains raw distances to nearest neighbors, while the
+/// connectivities matrix contains Gaussian-weighted connectivity values used
+/// for community detection algorithms.
 pub struct NeighborResult<T> {
+    /// Sparse matrix of distances to k-nearest neighbors
     pub distances: CsrMatrix<T>,
+    /// Sparse matrix of Gaussian-weighted connectivity values
     pub connectivities: CsrMatrix<T>,
 }
 
+/// Computes K-nearest neighbors using KD-tree with Gaussian connectivity weighting.
+///
+/// This function is optimized for smaller datasets (< 250k samples) and uses the kiddo
+/// KD-tree implementation for efficient nearest neighbor search. It applies Gaussian
+/// weighting to create connectivity matrices suitable for community detection.
+///
+/// # Arguments
+/// * `data` - 2D array view containing the input data points
+/// * `k` - Number of nearest neighbors to find
+///
+/// # Returns
+/// `NeighborResult` containing distance and connectivity CSR matrices
+///
+/// # Errors
+/// Returns error if data is not 2D or has insufficient features for K-dimensional search
 pub fn knn_arrayd_kiddo_gaussian<T, const K: usize, D>(
     data: ArrayViewD<T>,
     k: u64,
@@ -169,6 +203,10 @@ where
     })
 }
 
+/// Creates a CSR matrix from coordinate triplets.
+///
+/// Converts a list of (row, col, value) triplets into an efficient CSR sparse matrix
+/// representation for subsequent matrix operations.
 fn create_csr_from_triplets<T>(
     n: usize,
     triplets: Vec<(usize, usize, T)>,
@@ -190,6 +228,10 @@ where
     Ok(CsrMatrix::from(&coo))
 }
 
+/// Performs KNN search in large batches to optimize memory usage.
+///
+/// This function processes KNN queries in batches with controlled parallelism
+/// to reduce memory bandwidth contention and improve performance on large datasets.
 pub fn knn_search_large_batches<T, const K: usize, D>(
     kdtree: &kiddo::KdTree<T, K>,
     data: ArrayViewD<T>,
@@ -273,6 +315,13 @@ where
     (knn_indices, knn_distances)
 }
 
+/// Calculates optimal HNSW parameters based on dataset size and k value.
+///
+/// Returns tuned parameters for HNSW construction that balance search quality
+/// and performance based on the number of samples and desired neighbors.
+///
+/// # Returns
+/// Tuple of (max_nb_connection, nb_layer, ef_construction, ef_search)
 pub fn get_optimal_hnsw_params(n_samples: usize, k: usize) -> (usize, usize, usize, usize) {
     let max_nb_connection = match n_samples {
         n if n < 10_000 => 16,
@@ -297,6 +346,18 @@ pub fn get_optimal_hnsw_params(n_samples: usize, k: usize) -> (usize, usize, usi
     (max_nb_connection, nb_layer, ef_construction, ef_search)
 }
 
+/// Computes K-nearest neighbors using HNSW with Gaussian connectivity weighting.
+///
+/// This function is optimized for larger datasets (>= 250k samples) and uses the
+/// HNSW (Hierarchical Navigable Small World) algorithm for approximate nearest
+/// neighbor search with high performance and good recall.
+///
+/// # Arguments
+/// * `data` - 2D array view containing the input data points
+/// * `k` - Number of nearest neighbors to find
+///
+/// # Returns
+/// `NeighborResult` containing distance and connectivity CSR matrices
 pub fn knn_arrayd_hnswlib_gaussian<T, const K: usize>(
     data: ArrayViewD<T>,
     k: u64,
@@ -518,6 +579,18 @@ where
     })
 }
 
+/// Adaptive KNN algorithm that automatically selects the best approach.
+///
+/// This function automatically chooses between KD-tree (for smaller datasets)
+/// and HNSW (for larger datasets) based on a predefined threshold to optimize
+/// performance across different dataset sizes.
+///
+/// # Arguments
+/// * `data` - 2D array view containing the input data points  
+/// * `k` - Number of nearest neighbors to find
+///
+/// # Returns
+/// `NeighborResult` containing distance and connectivity CSR matrices
 pub fn knn_arrayd_adaptive<T, const K: usize, D>(
     data: ArrayViewD<T>,
     k: u64,

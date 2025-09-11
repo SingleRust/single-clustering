@@ -1,3 +1,8 @@
+//! Modularity-based vertex partition implementation.
+//!
+//! Implements the modularity quality function for community detection, which measures
+//! the density of connections within communities compared to a random null model.
+
 use single_utilities::traits::FloatOpsTS;
 
 use crate::{
@@ -5,6 +10,10 @@ use crate::{
     network::{grouping::NetworkGrouping, CSRNetwork},
 };
 
+/// Modularity-based vertex partition for community detection.
+///
+/// Uses the modularity quality function to evaluate community structures by comparing
+/// the density of internal connections against a null model based on node degrees.
 #[derive(Clone)]
 pub struct ModularityPartition<N, G>
 where
@@ -21,6 +30,7 @@ where
     N: FloatOpsTS + 'static,
     G: NetworkGrouping,
 {
+    /// Creates a new modularity partition with the given network and grouping.
     pub fn new(network: CSRNetwork<N, N>, grouping: G) -> Self {
         let tot_weight = network.total_weight();
         Self {
@@ -30,15 +40,18 @@ where
         }
     }
 
+    /// Creates a new partition with singleton communities (each node in its own community).
     pub fn new_singleton(network: CSRNetwork<N, N>) -> Self {
         let grouping = G::create_isolated(network.node_count());
         Self::new(network, grouping)
     }
 
+    /// Consumes the partition and returns the underlying grouping structure.
     pub fn into_grouping(self) -> G {
         self.grouping
     }
 
+    /// Calculates the total weight of edges from a node to a specific community.
     fn weight_to_comm(&self, node: usize, community: usize) -> N {
         let mut weight = N::zero();
         for (neighbor, edge_weight) in self.network.neighbors(node) {
@@ -54,6 +67,7 @@ where
         self.weight_to_comm(node, community)
     }
 
+    /// Calculates the total degree (strength) of all nodes in a community.
     fn total_weight_from_comm(&self, community: usize) -> N {
         if community >= self.grouping.group_count() {
             return N::zero();
@@ -73,6 +87,7 @@ where
         self.total_weight_from_comm(community)
     }
 
+    /// Calculates the total weight of edges within a community (internal edges).
     fn total_weight_in_comm(&self, community: usize) -> N {
         if community >= self.grouping.group_count() {
             return N::zero();
@@ -97,6 +112,7 @@ where
         total_weight
     }
 
+    /// Returns the weight of self-loops for a node (if any).
     fn node_self_weight(&self, node: usize) -> N {
         // Look for self-loop
         for (neighbor, weight) in self.network.neighbors(node) {
@@ -107,6 +123,7 @@ where
         N::zero()
     }
 
+    /// Returns the strength (total degree) of a node.
     fn node_strength(&self, node: usize) -> N {
         self.network.strength(node)
     }
