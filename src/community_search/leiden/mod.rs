@@ -1,39 +1,60 @@
-use std::collections::{HashSet, VecDeque};
+//! Leiden algorithm implementation for community detection in networks.
+//!
+//! The Leiden algorithm is an improvement over the Louvain algorithm that guarantees
+//! well-connected communities. It uses a refinement phase to ensure high-quality
+//! partitions by preventing poorly connected communities. IMPORTANT: This code is currently work-in-progress and neither production ready nor optimize to the fullest!
 
-use rand::{Rng, SeedableRng, seq::SliceRandom};
-use rand_chacha::ChaCha8Rng;
-use single_utilities::traits::FloatOpsTS;
-
-use crate::network::{Network, grouping::NetworkGrouping};
 pub mod partition;
 mod optimizer;
 pub use optimizer::LeidenOptimizer;
 
+/// Strategy for selecting communities to consider during optimization.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ConsiderComms {
+    /// Consider all non-empty communities.
     AllComms = 1,
+    /// Consider communities of neighboring nodes only.
     AllNeighComms = 2,
+    /// Randomly select one community.
     RandComm = 3,
+    /// Randomly select a neighbor's community.
     RandNeighComm = 4,
 }
 
+/// Optimization routine for node movement during community detection.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum OptimiseRoutine {
+    /// Move individual nodes to different communities.
     MoveNodes = 10,
+    /// Merge entire nodes/communities together.
     MergeNodes = 11,
 }
 
+/// Configuration parameters for the Leiden algorithm.
+///
+/// Controls the behavior of community detection including iteration limits,
+/// convergence criteria, randomization, and optimization strategies.
 #[derive(Debug, Clone)]
 pub struct LeidenConfig {
+    /// Maximum number of iterations before termination.
     pub max_iterations: usize,
+    /// Convergence tolerance for quality improvement.
     pub tolerance: f64,
+    /// Random seed for reproducible results. None for random seed.
     pub seed: Option<u64>,
+    /// Maximum allowed community size. None for unlimited.
     pub max_community_size: Option<usize>,
+    /// Whether to perform partition refinement for better connectivity.
     pub refine_partition: bool,
+    /// Whether to consider moving nodes to empty communities.
     pub consider_empty_community: bool,
+    /// Strategy for selecting communities during main optimization.
     pub consider_comms: ConsiderComms,
+    /// Strategy for selecting communities during refinement.
     pub refine_consider_comms: ConsiderComms,
+    /// Optimization routine for main phase.
     pub optimise_routine: OptimiseRoutine,
+    /// Optimization routine for refinement phase.
     pub refine_routine: OptimiseRoutine,
 }
 

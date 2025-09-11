@@ -1,3 +1,9 @@
+//! # CSR Network Module
+//!
+//! This module provides a Compressed Sparse Row (CSR) representation of networks/graphs
+//! optimized for clustering algorithms. It supports weighted, undirected graphs with
+//! efficient neighbor iteration and community detection operations.
+
 use core::num;
 use std::collections::HashMap;
 
@@ -8,6 +14,15 @@ use single_utilities::traits::FloatOpsTS;
 
 use crate::network::grouping::{self, NetworkGrouping};
 
+/// A compressed sparse row (CSR) representation of a weighted, undirected network.
+///
+/// This structure provides efficient storage and access patterns for networks used in
+/// clustering algorithms. Neighbors are sorted for each node to enable binary search
+/// for edge weight lookups.
+///
+/// # Type Parameters
+/// * `N` - Node weight type (e.g., f32, f64)
+/// * `E` - Edge weight type (e.g., f32, f64)
 #[derive(Debug, Clone)]
 pub struct CSRNetwork<N, E> {
     node_ptrs: Vec<usize>,
@@ -27,6 +42,14 @@ where
     N: FloatOpsTS + 'static,
     E: FloatOpsTS + 'static,
 {
+    /// Creates a CSR network from a list of edges and node weights.
+    ///
+    /// Constructs the compressed sparse row representation by building adjacency lists,
+    /// sorting neighbors, and computing node degrees and strengths.
+    ///
+    /// # Arguments
+    /// * `edges` - List of (from, to, weight) tuples representing edges
+    /// * `node_weights` - Vector of weights for each node
     pub fn from_edges(edges: &[(usize, usize, E)], node_weights: Vec<N>) -> Self {
         let num_nodes = node_weights.len();
 
@@ -83,6 +106,10 @@ where
         }
     }
 
+    /// Creates a CSR network from a CSR matrix and node weights.
+    ///
+    /// Converts a nalgebra CSR matrix to the internal CSR network representation,
+    /// handling self-loops and ensuring undirected graph properties.
     pub fn from_csr_matrix(matrix: CsrMatrix<E>, node_weights: Vec<N>) -> Self {
         let mut edges = Vec::new();
 
@@ -101,6 +128,10 @@ where
         Self::from_edges(&edges, node_weights)
     }
 
+    /// Returns an iterator over the neighbors and edge weights of a node.
+    ///
+    /// Provides efficient iteration over all neighbors of a given node using
+    /// unsafe pointer arithmetic for maximum performance.
     #[inline]
     pub fn neighbors(&self, node: usize) -> CSRNeighborIterator<E> {
         debug_assert!(node < self.node_count());
@@ -115,31 +146,40 @@ where
         }
     }
 
+    /// Returns the number of nodes in the network.
     #[inline]
     pub fn node_count(&self) -> usize {
         self.node_weights.len()
     }
+    /// Returns the number of edges in the network.
     #[inline]
     pub fn edge_count(&self) -> usize {
         self.edge_count
     }
+    /// Returns the degree (number of neighbors) of a node.
     #[inline]
     pub fn degree(&self, node: usize) -> usize {
         self.degrees[node]
     }
+    /// Returns the strength (sum of edge weights) of a node.
     #[inline]
     pub fn strength(&self, node: usize) -> E {
         self.strengths[node]
     }
+    /// Returns the weight of a node.
     #[inline]
     pub fn node_weight(&self, node: usize) -> N {
         self.node_weights[node]
     }
+    /// Returns the total weight of all edges in the network.
     #[inline]
     pub fn total_weight(&self) -> E {
         self.total_weight
     }
 
+    /// Selects a random neighbor of a node with uniform probability.
+    ///
+    /// Returns `None` if the node has no neighbors.
     pub fn random_neighbor(&self, node: usize, rng: &mut impl rand::Rng) -> Option<usize> {
         let degree = self.degree(node);
         if degree == 0 {
@@ -151,6 +191,10 @@ where
         Some(self.neighbors[neighbor_idx])
     }
 
+    /// Returns the weight of an edge between two nodes.
+    ///
+    /// Uses binary search on the smaller degree node for efficient lookup.
+    /// Returns `None` if no edge exists between the nodes.
     pub fn edge_weight(&self, from: usize, to: usize) -> Option<E> {
         let (search_node, target) = if self.degree(from) <= self.degree(to) {
             (from, to)
@@ -167,6 +211,10 @@ where
         }
     }
 
+    /// Creates an aggregated network where nodes are grouped according to a grouping.
+    ///
+    /// Combines nodes within the same group into super-nodes, summing weights
+    /// appropriately. Used in multilevel clustering algorithms.
     pub fn aggregate<G: NetworkGrouping>(&self, grouping: &G) -> Self {
         let new_node_count = grouping.group_count();
         
@@ -217,6 +265,10 @@ where
         Self::from_edges(&edges, new_node_weights)
     }
 
+    /// Extracts a subgraph containing only nodes from a specific group.
+    ///
+    /// Creates a new network with only the nodes belonging to the specified group,
+    /// renumbering nodes consecutively starting from 0.
     pub fn subgraph<G: NetworkGrouping>(&self, grouping: &G, group: usize) -> Self {
         let group_members = &grouping.get_group_members()[group];
         let subgraph_size = group_members.len();
@@ -244,6 +296,7 @@ where
         Self::from_edges(&edges, new_node_weights)
     }
 
+    /// Converts the network back to a nalgebra CSR matrix format.
     pub fn to_csr_matrix(&self) -> CsrMatrix<E> {
         let n = self.node_count();
         let mut row_ptrs = vec![0; n + 1];
@@ -261,6 +314,7 @@ where
         CsrMatrix::try_from_csr_data(n, n, row_ptrs, col_indices, values).unwrap()
     }
 
+    /// Checks if the network contains any self-loops.
     pub fn has_self_loops(&self) -> bool {
         for node in 0..self.node_count() {
             for (neighbor, _) in self.neighbors(node) {
@@ -272,6 +326,7 @@ where
         false
     }
 
+    /// Calculates the density of the network (ratio of actual to possible edges).
     pub fn density(&self) -> f64 {
         let n = self.node_count() as f64;
         let m = self.edge_count as f64;
@@ -280,6 +335,10 @@ where
         if max_edges > 0.0 { m / max_edges } else { 0.0 }
     }
 
+    /// Calculates the total weight of edges from a node to a specific community.
+    ///
+    /// Uses optimized unsafe pointer arithmetic for maximum performance in
+    /// clustering algorithms.
     #[inline]
     pub fn weight_to_comm(&self, node: usize, community: usize, grouping: &impl NetworkGrouping) -> E {
         let start = self.node_ptrs[node];
@@ -460,6 +519,10 @@ where
     
 }
 
+/// High-performance iterator over neighbors and edge weights.
+///
+/// Uses unsafe pointer arithmetic to provide zero-cost iteration over
+/// the neighbors of a node in the CSR representation.
 pub struct CSRNeighborIterator<E> {
     neighbor_ptr: *const usize,
     weight_ptr: *const E,

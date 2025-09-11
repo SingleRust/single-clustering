@@ -1,3 +1,8 @@
+//! Reichardt-Bornholdt (RB) configuration model partition implementation.
+//!
+//! Implements the RB quality function which generalizes modularity with a tunable
+//! resolution parameter, allowing detection of communities at different scales.
+
 use single_utilities::traits::FloatOpsTS;
 
 use crate::{
@@ -5,6 +10,11 @@ use crate::{
     network::{grouping::NetworkGrouping, CSRNetwork},
 };
 
+/// Reichardt-Bornholdt configuration model partition for multi-resolution community detection.
+///
+/// Uses the RB quality function: Q = Σ(w_in - γ·k_c²/(2m)) where γ is the resolution parameter.
+/// Higher resolution detects smaller communities, lower resolution finds larger communities.
+/// Performance-optimized with caching for community strengths and internal weights.
 #[derive(Clone)]
 pub struct RBConfigurationPartition<N, G>
 where
@@ -13,18 +23,20 @@ where
 {
     network: CSRNetwork<N, N>,
     grouping: G,
+    /// Resolution parameter γ - controls community size preference
     resolution: N,
     total_weight: N,
-    two_m: N, // Pre-computed 2*total_weight
+    /// Pre-computed 2*total_weight for efficiency
+    two_m: N,
     
-    // Cache for node strengths (degrees) - never changes
+    /// Cached node strengths (degrees) - never changes
     node_strengths: Vec<N>,
     
-    // Cache for community strengths - updated when communities change
+    /// Cached community strengths - updated when communities change
     community_strengths: Vec<N>,
     community_strengths_dirty: bool,
     
-    // Cache for community internal weights
+    /// Cached community internal weights
     community_internal_weights: Vec<N>,
     community_internal_weights_dirty: bool,
 }
@@ -34,6 +46,10 @@ where
     N: FloatOpsTS + 'static,
     G: NetworkGrouping,
 {
+    /// Creates a new RB partition with specified network, grouping, and resolution parameter.
+    ///
+    /// The resolution parameter γ controls community size: higher values favor smaller communities,
+    /// lower values favor larger communities. γ=1 approximates standard modularity.
     pub fn new(network: CSRNetwork<N, N>, grouping: G, resolution: N) -> Self {
         let tot_weight = network.total_weight();
         let two_m = N::from(2.0).unwrap() * tot_weight;
@@ -62,16 +78,21 @@ where
         partition
     }
 
+    /// Creates a new partition with singleton communities and specified resolution.
     pub fn new_singleton(network: CSRNetwork<N, N>, resolution: N) -> Self {
         let grouping = G::create_isolated(network.node_count());
         Self::new(network, grouping, resolution)
     }
 
+    /// Consumes the partition and returns the underlying grouping structure.
     pub fn into_grouping(self) -> G {
         self.grouping
     }
     
-    /// Update community caches when needed - optimized for performance
+    /// Updates community caches when needed - optimized for performance.
+    ///
+    /// Recalculates community strengths and internal weights only when marked dirty.
+    /// Uses efficient resize and zero-out strategies to minimize allocations.
     #[inline]
     fn update_community_caches(&mut self) {
         let community_count = self.grouping.group_count();
@@ -124,14 +145,14 @@ where
         }
     }
     
-    /// Mark caches as dirty when community structure changes
+    /// Marks caches as dirty when community structure changes.
     #[inline]
     fn invalidate_caches(&mut self) {
         self.community_strengths_dirty = true;
         self.community_internal_weights_dirty = true;
     }
 
-    /// Fast weight calculation from node to community
+    /// Fast weight calculation from node to community.
     #[inline]
     fn weight_to_comm(&self, node: usize, community: usize) -> N {
         let mut weight = N::zero();
@@ -144,7 +165,7 @@ where
         weight
     }
 
-    /// Get cached community strength (fast lookup)
+    /// Gets cached community strength (fast lookup).
     #[inline]
     fn get_community_strength(&self, community: usize) -> N {
         if community < self.community_strengths.len() {
@@ -154,7 +175,7 @@ where
         }
     }
 
-    /// Get the self-loop weight of a node (optimized)
+    /// Gets the self-loop weight of a node (optimized).
     #[inline]
     fn node_self_weight(&self, node: usize) -> N {
         // Use the optimized method from CSRNetwork
@@ -244,7 +265,10 @@ where
     N: FloatOpsTS + 'static,
     G: NetworkGrouping,
 {
-    /// Optimized diff_move that uses cached values when mutable reference is available
+    /// Optimized diff_move that uses cached values for performance.
+    ///
+    /// Calculates the quality change from moving a node to a new community using
+    /// cached community strengths to avoid expensive recomputations.
     pub fn diff_move_cached(&mut self, node: usize, new_community: usize) -> N {
         let old_comm = self.grouping.get_group(node);
         if new_community == old_comm {
@@ -321,13 +345,13 @@ where
     N: FloatOpsTS + 'static,
     G: NetworkGrouping + Clone + Default,
 {
-    /// Create RB partition with specified resolution parameter
+    /// Creates RB partition with specified resolution parameter.
     pub fn with_resolution(network: CSRNetwork<N, N>, resolution: N) -> Self {
         let node_count = network.node_count();
         Self::new(network, G::create_isolated(node_count), resolution)
     }
 
-    /// Create RB partition with specified membership and resolution
+    /// Creates RB partition with specified membership and resolution.
     pub fn with_membership_and_resolution(
         network: CSRNetwork<N, N>,
         membership: &[usize],
@@ -336,29 +360,29 @@ where
         Self::new(network, G::from_assignments(membership), resolution)
     }
 
-    /// Get the current resolution parameter
+    /// Gets the current resolution parameter.
     pub fn resolution(&self) -> N {
         self.resolution
     }
 
-    /// Set a new resolution parameter
+    /// Sets a new resolution parameter.
     pub fn set_resolution(&mut self, resolution: N) {
         self.resolution = resolution;
     }
 
-    /// Get the membership of a node
+    /// Gets the membership of a node.
     #[inline]
     pub fn membership(&self, node: usize) -> usize {
         self.grouping.get_group(node)
     }
 
-    /// Get the community count
+    /// Gets the community count.
     #[inline]
     pub fn community_count(&self) -> usize {
         self.grouping.group_count()
     }
 
-    /// Get the node count
+    /// Gets the node count.
     #[inline]
     pub fn node_count(&self) -> usize {
         self.network.node_count()

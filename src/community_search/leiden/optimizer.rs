@@ -1,3 +1,8 @@
+//! Leiden algorithm optimizer implementation.
+//!
+//! Contains the core optimization logic for the Leiden community detection algorithm,
+//! including node movement, community merging, and partition refinement strategies.
+
 use std::{collections::VecDeque, time::Instant};
 
 use anyhow::Ok;
@@ -11,9 +16,15 @@ use crate::{
     network::{CSRNetwork, grouping::NetworkGrouping},
 };
 
+/// Result of evaluating a potential community move for a node.
+///
+/// Contains the target community and the quality improvement that would result
+/// from moving the node to that community.
 #[derive(Debug, Clone)]
 pub struct CommunityMoveResult<N> {
+    /// The community to move the node to.
     pub community: usize,
+    /// The quality improvement gained by this move.
     pub improvement: N,
 }
 
@@ -29,12 +40,20 @@ impl<N: FloatOpsTS> PartialOrd for CommunityMoveResult<N> {
     }
 }
 
+/// Core optimizer for the Leiden community detection algorithm.
+///
+/// Handles the iterative optimization process including node movement, community merging,
+/// partition refinement, and hierarchical aggregation to find high-quality community structures.
 pub struct LeidenOptimizer {
     config: LeidenConfig,
     rng: ChaCha8Rng,
 }
 
 impl LeidenOptimizer {
+    /// Creates a new Leiden optimizer with the specified configuration.
+    ///
+    /// Initializes the random number generator using the seed from the config,
+    /// or a random seed if none is provided.
     pub fn new(config: LeidenConfig) -> Self {
         let rng = match config.seed {
             Some(n) => ChaCha8Rng::seed_from_u64(n),
@@ -44,6 +63,11 @@ impl LeidenOptimizer {
         Self { config, rng }
     }
 
+    /// Merges nodes into communities by evaluating all possible moves.
+    ///
+    /// Unlike `move_nodes`, this method considers merging entire nodes/communities
+    /// rather than individual node movements, which can be more efficient for
+    /// certain network structures.
     fn merge_nodes<N, G, P>(
         &mut self,
         partitions: &mut [P],
@@ -166,6 +190,10 @@ impl LeidenOptimizer {
         Ok(total_improvement)
     }
 
+    /// Finds the best community for a node to move to.
+    ///
+    /// Evaluates the quality improvement for moving a node to each candidate
+    /// community and returns the community and improvement of the best move.
     fn find_best_community_move<N, G, P>(
     &self,
     v: usize,
@@ -272,6 +300,10 @@ where
     Ok((max_comm, max_improv))
 }
 
+    /// Collects candidate communities that a node can potentially move to.
+    ///
+    /// Uses the specified `ConsiderComms` strategy to determine which communities
+    /// should be evaluated as potential destinations for the node.
     fn collect_candidate_communities<N, G, P>(
         &mut self,
         v: usize,
@@ -371,6 +403,11 @@ where
         }
     }
 
+    /// Moves nodes between communities to optimize partition quality.
+    ///
+    /// Core optimization routine that iteratively moves nodes to better communities
+    /// until no further improvement can be made. Uses a queue-based approach to
+    /// ensure all potentially beneficial moves are evaluated.
     fn move_nodes<N, G, P>(
         &mut self,
         partitions: &mut [P],
@@ -1058,6 +1095,18 @@ where
             && old_partition.node_count() > old_partition.community_count()
     }
 
+    /// Optimizes multiple partitions simultaneously across different layers.
+    ///
+    /// Performs the complete Leiden optimization including iterative node movement,
+    /// community aggregation, and refinement until convergence or max iterations.
+    ///
+    /// # Arguments
+    /// * `partitions` - Array of partitions to optimize (one per layer)
+    /// * `layer_weights` - Relative importance weights for each layer
+    /// * `is_membership_fixed` - Nodes that cannot change communities
+    ///
+    /// # Returns
+    /// Total quality improvement achieved during optimization
     pub fn optimize_partition<N, G, P>(
         &mut self,
         partitions: &mut [P],
@@ -1204,6 +1253,17 @@ where
         Ok(total_improvement)
     }
 
+    /// Optimizes a single partition using Leiden algorithm.
+    ///
+    /// Convenience method for optimizing a single-layer network partition.
+    /// Internally calls `optimize_partition` with appropriate single-layer parameters.
+    ///
+    /// # Arguments
+    /// * `partition` - The partition to optimize
+    /// * `is_membership_fixed` - Optional array of nodes that cannot change communities
+    ///
+    /// # Returns
+    /// Total quality improvement achieved during optimization
     pub fn optimize_single_partition<N, G, P>(
         &mut self,
         partition: &mut P,
@@ -1227,6 +1287,16 @@ where
         Ok(improvement)
     }
 
+    /// Finds the optimal community partition for a network from scratch.
+    ///
+    /// Creates a singleton partition (each node in its own community) and then
+    /// optimizes it using the Leiden algorithm to discover community structure.
+    ///
+    /// # Arguments
+    /// * `network` - The network to partition
+    ///
+    /// # Returns
+    /// Optimized partition with detected communities
     pub fn find_partition<N, G, P>(&mut self, network: CSRNetwork<N, N>) -> anyhow::Result<P>
     where
         N: FloatOpsTS + 'static,

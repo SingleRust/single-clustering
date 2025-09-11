@@ -1,38 +1,50 @@
 # single-clustering
 
-A Rust library for community detection and graph clustering algorithms.
+⚠️ **Development Status**: This library is currently under heavy development and should **not be considered production ready**. APIs may change significantly between versions.
+
+A Rust library for community detection and graph clustering algorithms with a focus on performance and flexibility.
 
 ## Features
 
-- **Network Analysis**: Efficient graph representation and manipulation for clustering tasks
-- **Community Detection**: Implementation of state-of-the-art algorithms
-    - Louvain method for community detection
-    - Leiden algorithm (enhanced version of Louvain)
-- **Flexible Grouping**: Abstract trait system for creating and managing node clusters
-- **Performance**: Parallel computation support via Rayon
-- **K-NN Graph Creation**: Build networks from high-dimensional data points
+- **Efficient Network Representation**: CSR (Compressed Sparse Row) format for optimal memory usage and performance
+- **Community Detection Algorithms**:
+    - **Leiden Algorithm**: State-of-the-art method with guaranteed well-connected communities
+    - **Louvain Method**: Classic modularity optimization (work-in-progress)
+- **Quality Functions**: Multiple partition quality metrics
+    - Modularity optimization
+    - Reichardt-Bornholdt (RB) configuration model with tunable resolution
+- **Flexible Architecture**: Generic trait-based design supporting different network types and grouping strategies
+- **Performance Optimized**: Caching strategies and efficient data structures for large networks
 
 ## Usage
 
 ```rust
-use single_clustering::network::Network;
-use single_clustering::network::grouping::VectorGrouping;
-use single_clustering::community_search::leiden::Leiden;
+use single_clustering::network::CSRNetwork;
+use single_clustering::community_search::leiden::{LeidenOptimizer, LeidenConfig};
+use single_clustering::community_search::leiden::partition::ModularityPartition;
 
-// Create a network from your data
-let network = Network::new_from_graph(graph);
+// Create a CSR network from your data
+let network = CSRNetwork::new(edges, weights, node_count);
 
-// Initialize clustering (each node in its own cluster)
-let mut clustering = VectorGrouping::create_isolated(network.nodes());
+// Configure the Leiden algorithm
+let config = LeidenConfig {
+    max_iterations: 100,
+    tolerance: 1e-6,
+    seed: Some(42),
+    ..Default::default()
+};
 
-// Run Leiden algorithm (resolution parameter, randomness parameter, optional seed)
-let mut leiden = Leiden::new(1.0, 0.01, Some(42));
-leiden.iterate(&network, &mut clustering);
+// Initialize the optimizer
+let mut optimizer = LeidenOptimizer::new(config);
 
-// Access clustering results
-for node in 0..network.nodes() {
-    println!("Node {} belongs to cluster {}", node, clustering.get_group(node));
+// Find communities using modularity optimization
+let partition: ModularityPartition<f64, _> = optimizer.find_partition(network)?;
+
+// Access results
+for node in 0..partition.node_count() {
+    println!("Node {} is in community {}", node, partition.membership(node));
 }
+println!("Modularity: {:.4}", partition.quality());
 ```
 
 ## Installation
@@ -41,16 +53,23 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-single-clustering = "0.1.0"
+single-clustering = "0.6.0"
 ```
 
-## Performance Considerations
+## Current Status
 
-The library offers multiple implementations optimized for different scenarios:
-- `StandardLocalMoving`: Basic implementation of the moving algorithm
-- `FastLocalMoving`: Optimized version with better memory usage
-- Parallel implementations of various operations for large networks
+- ✅ **Leiden Algorithm**: Core implementation with modularity and RB quality functions
+- ✅ **CSR Network Representation**: Efficient storage for large graphs
+- ✅ **Quality Functions**: Modularity and Reichardt-Bornholdt implementations
+- 🚧 **Louvain Algorithm**: Basic implementation (work-in-progress)
+- 🚧 **Documentation**: API documentation and examples (ongoing)
+- ❌ **Benchmarks**: Performance testing suite (planned)
+- ❌ **Python Bindings**: PyO3 integration (planned)
+
+## Contributing
+
+This project is in active development. Contributions, bug reports, and feature requests are welcome!
 
 ## License
 
-This crate is licensed under the MIT License.
+This crate is licensed under the BSD 3-Clause License.

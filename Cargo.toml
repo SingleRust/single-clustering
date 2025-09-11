@@ -1,6 +1,6 @@
 [package]
 name = "single-clustering"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2024"
 authors = ["Ian F. Diks"]
 homepage = "https://singlerust.com"
@@ -12,13 +12,13 @@ description = "A high-performance network clustering library implementing commun
 
 [dependencies]
 anyhow = "1.0.98"
-kiddo = {version = "5.0.3" }
+kiddo = {version = "5.2.2" }
 nalgebra-sparse = "0.10.0"
 ndarray = {version = "0.16.1" , features = ["rayon"]}
 num-traits = "0.2.19"
-petgraph = { version = "0.8.1", features = ["rayon"] }
+petgraph = { version = "0.8.2", features = ["rayon"] }
 rayon = "1.10.0"
-single-utilities = "0.6.0"
+single-utilities = "0.8.5"
 rand = "0.9.0"
 rand_chacha = {version = "0.9.0"}
 hnsw_rs = {version = "0.3.2", features = ["simdeez_f"]}
