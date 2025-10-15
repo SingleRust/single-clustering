@@ -3,10 +3,7 @@
 //! Contains the core optimization logic for the Leiden community detection algorithm,
 //! including node movement, community merging, and partition refinement strategies.
 
-use std::{
-    collections::VecDeque,
-    time::{Duration, Instant},
-};
+use std::{collections::VecDeque, time::Instant};
 
 use anyhow::Ok;
 use num_traits::Float;
@@ -15,12 +12,8 @@ use rand_chacha::ChaCha8Rng;
 use single_utilities::traits::FloatOpsTS;
 
 use crate::{
-    community_search::leiden::{
-        ConsiderComms, LeidenConfig,
-        parallel::{ConflictFreeBatcher, ParallelEvaluator},
-        partition::VertexPartition,
-    },
-    network::{CSRNetwork, grouping::NetworkGrouping},
+    community_search::leiden::{parallel::{ConflictFreeBatcher, ParallelEvaluator}, partition::VertexPartition, ConsiderComms, LeidenConfig},
+    network::{grouping::NetworkGrouping, CSRNetwork},
 };
 
 /// Result of evaluating a potential community move for a node.
@@ -584,6 +577,7 @@ impl LeidenOptimizer {
         Ok(total_improv)
     }
 
+
     fn move_nodes_parallel<N, G, P>(
         &mut self,
         partitions: &mut [P],
@@ -591,203 +585,35 @@ impl LeidenOptimizer {
         is_membership_fixed: &[bool],
         consider_comms: ConsiderComms,
         consider_empty_community: bool,
-        max_comm_size: Option<usize>,
-    ) -> anyhow::Result<N>
+        max_comm_size: Option<usize>
+    ) -> anyhow::Result<N> 
     where
         N: FloatOpsTS + 'static,
-        G: NetworkGrouping + Clone + Default,
-        P: VertexPartition<N, G>,
-    {
-        let n = partitions[0].node_count();
-        let network = partitions[0].network().clone();
+        G: NetworkGrouping,
+        P: VertexPartition<N, G> {
+            let n = partitions[0].node_count();
+            let network = partitions[0].network().clone();
 
-        let mut total_improv = N::zero();
-        let mut is_node_stable = is_membership_fixed.to_vec();
+            let mut total_improv = N::zero();
+            let mut is_node_stable = is_membership_fixed.to_vec();
 
-        let mut nodes: Vec<usize> = (0..n).filter(|&v| !is_membership_fixed[v]).collect();
-        nodes.shuffle(&mut self.rng);
+            let mut nodes: Vec<usize> = (0..n)
+            .filter(|&v| !is_membership_fixed[v])
+            .collect();
+            nodes.shuffle(&mut self.rng);
 
-        let mut pending_nodes: VecDeque<usize> = nodes.into();
-        let batcher = ConflictFreeBatcher::new(10_000);
+            let mut pending_nodes: VecDeque<usize> = nodes.into();
+            let batcher = ConflictFreeBatcher::new(10_000);
 
-        const MIN_PARALLEL_BATCH_SIZE: usize = 50;
-        const MIN_PARALLEL_NODES: usize = 100;
+            while !pending_nodes.is_empty() {
+                let current_nodes: Vec<usize> = pending_nodes.drain(..).collect();
+                let batches = batcher.create_batches(&current_nodes, &network, &is_node_stable);
 
-        let mut total_candidates_checked = 0usize;
-        let mut total_nodes_evaluated = 0usize;
+                for batch in batches {
+                    let proposed_moves = ParallelEvaluator::evaluate_batch(&batch, partitions, layer_weights, consider_comms, consider_empty_community, max_comm_size);
 
-        let mut batch_round = 0;
-
-        while !pending_nodes.is_empty() {
-            let current_nodes: Vec<usize> = pending_nodes.drain(..).collect();
-
-            if current_nodes.len() < MIN_PARALLEL_NODES {
-                println!("  Sequential evaluation: {} nodes", current_nodes.len());
-
-                let seq_start = Instant::now();
-                let mut seq_beneficial = 0;
-
-                for node in current_nodes {
-                    total_nodes_evaluated += 1;
-
-                    let current_comm = partitions[0].membership(node);
-
-                    let mut comm_added = vec![false; partitions[0].community_count()];
-                    let mut candidates = Vec::new();
-
-                    self.collect_candidate_communities(
-                        node,
-                        partitions,
-                        consider_comms,
-                        &mut candidates,
-                        &mut comm_added,
-                    );
-
-                    total_candidates_checked += candidates.len();
-
-                    if consider_empty_community && partitions[0].cnodes(current_comm) > 1 {
-                        let empty_comm = partitions[0].get_empty_community();
-                        candidates.push(empty_comm);
-                    }
-
-                    let (best_comm, improvement) = self.find_best_community_move(
-                        node,
-                        current_comm,
-                        &candidates,
-                        partitions,
-                        layer_weights,
-                        max_comm_size,
-                    )?;
-
-                    if best_comm != current_comm && improvement > N::zero() {
-                        seq_beneficial += 1;
-                        total_improv += improvement;
-
-                        for partition in partitions.iter_mut() {
-                            partition.move_node(node, best_comm);
-                        }
-
-                        is_node_stable[node] = true;
-
-                        for (neighbor, _) in network.neighbors(node) {
-                            if is_node_stable[neighbor]
-                                && partitions[0].membership(neighbor) != best_comm
-                                && !is_membership_fixed[neighbor]
-                            {
-                                pending_nodes.push_back(neighbor);
-                                is_node_stable[neighbor] = false;
-                            }
-                        }
-                    }
-                }
-
-                println!(
-                    "    Sequential: {} beneficial moves in {:?}",
-                    seq_beneficial,
-                    seq_start.elapsed()
-                );
-                batch_round += 1;
-                continue;
-            }
-
-            let batches = batcher.create_batches(&current_nodes, &network, &is_node_stable);
-
-            println!(
-                "  Batch #{}: {} nodes -> {} conflict-free batches",
-                batch_round,
-                current_nodes.len(),
-                batches.len()
-            );
-
-            for (batch_idx, batch) in batches.iter().enumerate() {
-                if batch.is_empty() {
-                    continue;
-                }
-
-                let batch_start = Instant::now();
-
-                if batch.len() < MIN_PARALLEL_BATCH_SIZE {
-                    let mut seq_beneficial = 0;
-
-                    for &node in batch.iter() {
-                        total_nodes_evaluated += 1;
-
-                        let current_comm = partitions[0].membership(node);
-
-                        let mut comm_added = vec![false; partitions[0].community_count()];
-                        let mut candidates = Vec::new();
-
-                        self.collect_candidate_communities(
-                            node,
-                            partitions,
-                            consider_comms,
-                            &mut candidates,
-                            &mut comm_added,
-                        );
-
-                        total_candidates_checked += candidates.len();
-
-                        if consider_empty_community && partitions[0].cnodes(current_comm) > 1 {
-                            let empty_comm = partitions[0].get_empty_community();
-                            candidates.push(empty_comm);
-                        }
-
-                        let (best_comm, improvement) = self.find_best_community_move(
-                            node,
-                            current_comm,
-                            &candidates,
-                            partitions,
-                            layer_weights,
-                            max_comm_size,
-                        )?;
-
-                        if best_comm != current_comm && improvement > N::zero() {
-                            seq_beneficial += 1;
-                            total_improv += improvement;
-
-                            for partition in partitions.iter_mut() {
-                                partition.move_node(node, best_comm);
-                            }
-
-                            is_node_stable[node] = true;
-
-                            for (neighbor, _) in network.neighbors(node) {
-                                if is_node_stable[neighbor]
-                                    && partitions[0].membership(neighbor) != best_comm
-                                    && !is_membership_fixed[neighbor]
-                                {
-                                    pending_nodes.push_back(neighbor);
-                                    is_node_stable[neighbor] = false;
-                                }
-                            }
-                        }
-                    }
-
-                    if batch_idx < 3 || seq_beneficial > 0 {
-                        println!(
-                            "    Sub-batch #{} (seq): {} nodes, {} beneficial (took {:?})",
-                            batch_idx,
-                            batch.len(),
-                            seq_beneficial,
-                            batch_start.elapsed()
-                        );
-                    }
-                } else {
-                    let proposed_moves = ParallelEvaluator::evaluate_batch(
-                        batch,
-                        partitions,
-                        layer_weights,
-                        consider_comms,
-                        consider_empty_community,
-                        max_comm_size,
-                    );
-
-                    total_nodes_evaluated += batch.len();
-
-                    let mut beneficial_count = 0;
                     for proposed in proposed_moves {
                         if proposed.is_beneficial() {
-                            beneficial_count += 1;
                             total_improv += proposed.improvement;
 
                             for partition in partitions.iter_mut() {
@@ -797,47 +623,24 @@ impl LeidenOptimizer {
                             is_node_stable[proposed.node] = true;
 
                             for (neighbor, _) in network.neighbors(proposed.node) {
-                                if is_node_stable[neighbor]
-                                    && partitions[0].membership(neighbor) != proposed.to_comm
-                                    && !is_membership_fixed[neighbor]
-                                {
+                                if is_node_stable[neighbor] && partitions[0].membership(neighbor) != proposed.to_comm && !is_membership_fixed[neighbor] {
                                     pending_nodes.push_back(neighbor);
                                     is_node_stable[neighbor] = false;
                                 }
                             }
                         }
                     }
-
-                    if batch_idx < 3 || beneficial_count > 0 {
-                        println!(
-                            "    Sub-batch #{} (par): {} nodes, {} beneficial (took {:?})",
-                            batch_idx,
-                            batch.len(),
-                            beneficial_count,
-                            batch_start.elapsed()
-                        );
-                    }
                 }
             }
 
-            batch_round += 1;
-        }
+            partitions[0].renumber_communities();
+            let membership = partitions[0].membership_vector();
+            for partition in partitions.iter_mut().skip(1) {
+                partition.set_membership(&membership);
+            }
 
-        if total_nodes_evaluated > 0 {
-            println!(
-                "  Avg candidates per node: {:.1}",
-                total_candidates_checked as f64 / total_nodes_evaluated as f64
-            );
+            Ok(total_improv)
         }
-
-        partitions[0].renumber_communities();
-        let membership = partitions[0].membership_vector();
-        for partition in partitions.iter_mut().skip(1) {
-            partition.set_membership(&membership);
-        }
-
-        Ok(total_improv)
-    }
 
     fn move_nodes_constrained<N, G, P>(
         &mut self,
