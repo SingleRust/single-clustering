@@ -5,7 +5,7 @@
 //! efficient neighbor iteration and community detection operations.
 
 use core::num;
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use nalgebra_sparse::CsrMatrix;
 use rand::random;
@@ -24,7 +24,7 @@ use crate::network::grouping::{self, NetworkGrouping};
 /// * `N` - Node weight type (e.g., f32, f64)
 /// * `E` - Edge weight type (e.g., f32, f64)
 #[derive(Debug, Clone)]
-pub struct CSRNetwork<N, E> {
+pub struct CSRNetworkData<N, E> {
     node_ptrs: Vec<usize>,
     neighbors: Vec<usize>,
     weights: Vec<E>,
@@ -35,6 +35,11 @@ pub struct CSRNetwork<N, E> {
     strengths: Vec<E>,
     total_weight: E,
     edge_count: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct CSRNetwork<N, E> {
+    data: Arc<CSRNetworkData<N, E>>,
 }
 
 impl<N, E> CSRNetwork<N, E>
@@ -94,7 +99,7 @@ where
             node_ptrs.push(neighbors.len());
         }
 
-        Self {
+        let csr = CSRNetworkData {
             node_ptrs,
             neighbors,
             weights,
@@ -103,6 +108,10 @@ where
             strengths,
             total_weight,
             edge_count: edges.len(),
+        };
+
+        Self {
+            data: Arc::new(csr),
         }
     }
 
@@ -136,12 +145,12 @@ where
     pub fn neighbors(&self, node: usize) -> CSRNeighborIterator<E> {
         debug_assert!(node < self.node_count());
 
-        let start = self.node_ptrs[node];
-        let end = self.node_ptrs[node + 1];
+        let start = self.data.node_ptrs[node];
+        let end = self.data.node_ptrs[node + 1];
 
         CSRNeighborIterator {
-            neighbor_ptr: unsafe { self.neighbors.as_ptr().add(start) },
-            weight_ptr: unsafe { self.weights.as_ptr().add(start) },
+            neighbor_ptr: unsafe { self.data.neighbors.as_ptr().add(start) },
+            weight_ptr: unsafe { self.data.weights.as_ptr().add(start) },
             remaining: end - start,
         }
     }
@@ -149,32 +158,32 @@ where
     /// Returns the number of nodes in the network.
     #[inline]
     pub fn node_count(&self) -> usize {
-        self.node_weights.len()
+        self.data.node_weights.len()
     }
     /// Returns the number of edges in the network.
     #[inline]
     pub fn edge_count(&self) -> usize {
-        self.edge_count
+        self.data.edge_count
     }
     /// Returns the degree (number of neighbors) of a node.
     #[inline]
     pub fn degree(&self, node: usize) -> usize {
-        self.degrees[node]
+        self.data.degrees[node]
     }
     /// Returns the strength (sum of edge weights) of a node.
     #[inline]
     pub fn strength(&self, node: usize) -> E {
-        self.strengths[node]
+        self.data.strengths[node]
     }
     /// Returns the weight of a node.
     #[inline]
     pub fn node_weight(&self, node: usize) -> N {
-        self.node_weights[node]
+        self.data.node_weights[node]
     }
     /// Returns the total weight of all edges in the network.
     #[inline]
     pub fn total_weight(&self) -> E {
-        self.total_weight
+        self.data.total_weight
     }
 
     /// Selects a random neighbor of a node with uniform probability.
@@ -187,8 +196,8 @@ where
         }
 
         let random_idx = rng.random_range(0..degree);
-        let neighbor_idx = self.node_ptrs[node] + random_idx;
-        Some(self.neighbors[neighbor_idx])
+        let neighbor_idx = self.data.node_ptrs[node] + random_idx;
+        Some(self.data.neighbors[neighbor_idx])
     }
 
     /// Returns the weight of an edge between two nodes.
@@ -202,11 +211,11 @@ where
             (to, from)
         };
 
-        let start = self.node_ptrs[search_node];
-        let end = self.node_ptrs[search_node + 1];
+        let start = self.data.node_ptrs[search_node];
+        let end = self.data.node_ptrs[search_node + 1];
 
-        match self.neighbors[start..end].binary_search(&target) {
-            Ok(pos) => Some(self.weights[start + pos]),
+        match self.data.neighbors[start..end].binary_search(&target) {
+            Ok(pos) => Some(self.data.weights[start + pos]),
             Err(_) => None,
         }
     }
@@ -217,29 +226,29 @@ where
     /// appropriately. Used in multilevel clustering algorithms.
     pub fn aggregate<G: NetworkGrouping>(&self, grouping: &G) -> Self {
         let new_node_count = grouping.group_count();
-        
+
         let mut new_node_weights = vec![N::zero(); new_node_count];
-        
+
         for node in 0..self.node_count() {
             let group = grouping.get_group(node);
-            new_node_weights[group] += self.node_weights[node];
+            new_node_weights[group] += self.data.node_weights[node];
         }
-        
+
         let mut edge_memo = HashMap::new();
         let mut self_loop_weights = HashMap::new();
-        
+
         for node in 0..self.node_count() {
-            let start = self.node_ptrs[node];
-            let end = self.node_ptrs[node + 1];
-            
+            let start = self.data.node_ptrs[node];
+            let end = self.data.node_ptrs[node + 1];
+
             for i in start..end {
-                let neighbor = self.neighbors[i];
-                let weight = self.weights[i];
-                
+                let neighbor = self.data.neighbors[i];
+                let weight = self.data.weights[i];
+
                 if node <= neighbor {
                     let g1 = grouping.get_group(node);
                     let g2 = grouping.get_group(neighbor);
-                    
+
                     if g1 == g2 {
                         *self_loop_weights.entry(g1).or_insert(E::zero()) += weight;
                     } else {
@@ -249,19 +258,19 @@ where
                 }
             }
         }
-        
+
         let mut edges = Vec::new();
-        
+
         for (&group, &weight) in self_loop_weights.iter() {
             if weight > E::zero() {
                 edges.push((group, group, weight));
             }
         }
-        
+
         for (&(g1, g2), &weight) in edge_memo.iter() {
             edges.push((g1, g2, weight));
         }
-        
+
         Self::from_edges(&edges, new_node_weights)
     }
 
@@ -278,7 +287,7 @@ where
 
         for (new_id, &old_id) in group_members.iter().enumerate() {
             node_map.insert(old_id, new_id);
-            new_node_weights.push(self.node_weights[old_id]);
+            new_node_weights.push(self.data.node_weights[old_id]);
         }
 
         let mut edges = Vec::new();
@@ -300,8 +309,8 @@ where
     pub fn to_csr_matrix(&self) -> CsrMatrix<E> {
         let n = self.node_count();
         let mut row_ptrs = vec![0; n + 1];
-        let mut col_indices = Vec::with_capacity(self.neighbors.len());
-        let mut values = Vec::with_capacity(self.weights.len());
+        let mut col_indices = Vec::with_capacity(self.data.neighbors.len());
+        let mut values = Vec::with_capacity(self.data.weights.len());
 
         for node in 0..n {
             for (neighbor, weight) in self.neighbors(node) {
@@ -329,7 +338,7 @@ where
     /// Calculates the density of the network (ratio of actual to possible edges).
     pub fn density(&self) -> f64 {
         let n = self.node_count() as f64;
-        let m = self.edge_count as f64;
+        let m = self.data.edge_count as f64;
         let max_edges = n * (n - 1.0) / 2.0;
 
         if max_edges > 0.0 { m / max_edges } else { 0.0 }
@@ -340,22 +349,27 @@ where
     /// Uses optimized unsafe pointer arithmetic for maximum performance in
     /// clustering algorithms.
     #[inline]
-    pub fn weight_to_comm(&self, node: usize, community: usize, grouping: &impl NetworkGrouping) -> E {
-        let start = self.node_ptrs[node];
-        let end = self.node_ptrs[node + 1];
-        
+    pub fn weight_to_comm(
+        &self,
+        node: usize,
+        community: usize,
+        grouping: &impl NetworkGrouping,
+    ) -> E {
+        let start = self.data.node_ptrs[node];
+        let end = self.data.node_ptrs[node + 1];
+
         if start == end {
             return E::zero();
         }
-        
+
         let mut weight = E::zero();
-        
+
         // Direct unsafe pointer access for maximum performance
         unsafe {
-            let mut neighbor_ptr = self.neighbors.as_ptr().add(start);
-            let mut weight_ptr = self.weights.as_ptr().add(start);
+            let mut neighbor_ptr = self.data.neighbors.as_ptr().add(start);
+            let mut weight_ptr = self.data.weights.as_ptr().add(start);
             let mut remaining = end - start;
-            
+
             while remaining > 0 {
                 let neighbor = *neighbor_ptr;
                 if grouping.get_group(neighbor) == community {
@@ -366,110 +380,126 @@ where
                 remaining -= 1;
             }
         }
-        
+
         weight
     }
 
     #[inline]
-    pub fn weight_to_two_comms(&self, node: usize, comm1: usize, comm2: usize, grouping: &impl NetworkGrouping) -> (E, E) {
-        let start = self.node_ptrs[node];
-        let end = self.node_ptrs[node + 1];
-        
+    pub fn weight_to_two_comms(
+        &self,
+        node: usize,
+        comm1: usize,
+        comm2: usize,
+        grouping: &impl NetworkGrouping,
+    ) -> (E, E) {
+        let start = self.data.node_ptrs[node];
+        let end = self.data.node_ptrs[node + 1];
+
         if start == end {
             return (E::zero(), E::zero());
         }
-        
+
         let mut w1 = E::zero();
         let mut w2 = E::zero();
-        
+
         unsafe {
-            let mut neighbor_ptr = self.neighbors.as_ptr().add(start);
-            let mut weight_ptr = self.weights.as_ptr().add(start);
+            let mut neighbor_ptr = self.data.neighbors.as_ptr().add(start);
+            let mut weight_ptr = self.data.weights.as_ptr().add(start);
             let mut remaining = end - start;
-            
+
             while remaining > 0 {
                 let neighbor = *neighbor_ptr;
                 let neighbor_comm = grouping.get_group(neighbor);
                 let weight = *weight_ptr;
-                
+
                 if neighbor_comm == comm1 {
                     w1 += weight;
                 } else if neighbor_comm == comm2 {
                     w2 += weight;
                 }
-                
+
                 neighbor_ptr = neighbor_ptr.add(1);
                 weight_ptr = weight_ptr.add(1);
                 remaining -= 1;
             }
         }
-        
+
         (w1, w2)
     }
 
-    pub fn weight_to_comms_batch(&self, node: usize, communities: &[usize], grouping: &impl NetworkGrouping) -> Vec<E> {
+    pub fn weight_to_comms_batch(
+        &self,
+        node: usize,
+        communities: &[usize],
+        grouping: &impl NetworkGrouping,
+    ) -> Vec<E> {
         let mut weights = vec![E::zero(); communities.len()];
-        
+
         // Create lookup map for community index
         let community_to_idx: HashMap<usize, usize> = communities
             .iter()
             .enumerate()
             .map(|(i, &c)| (c, i))
             .collect();
-        
-        let start = self.node_ptrs[node];
-        let end = self.node_ptrs[node + 1];
-        
+
+        let start = self.data.node_ptrs[node];
+        let end = self.data.node_ptrs[node + 1];
+
         unsafe {
-            let mut neighbor_ptr = self.neighbors.as_ptr().add(start);
-            let mut weight_ptr = self.weights.as_ptr().add(start);
+            let mut neighbor_ptr = self.data.neighbors.as_ptr().add(start);
+            let mut weight_ptr = self.data.weights.as_ptr().add(start);
             let mut remaining = end - start;
-            
+
             while remaining > 0 {
                 let neighbor = *neighbor_ptr;
                 let neighbor_comm = grouping.get_group(neighbor);
-                
+
                 if let Some(&idx) = community_to_idx.get(&neighbor_comm) {
                     weights[idx] += *weight_ptr;
                 }
-                
+
                 neighbor_ptr = neighbor_ptr.add(1);
                 weight_ptr = weight_ptr.add(1);
                 remaining -= 1;
             }
         }
-        
+
         weights
     }
 
     #[inline]
     pub fn self_loop_weight(&self, node: usize) -> E {
-        let start = self.node_ptrs[node];
-        let end = self.node_ptrs[node + 1];
-        
+        let start = self.data.node_ptrs[node];
+        let end = self.data.node_ptrs[node + 1];
+
         if start >= end {
             return E::zero();
         }
-        
+
         // Check if first neighbor is self (common optimization)
-        if self.neighbors[start] == node {
-            return self.weights[start];
+        if self.data.neighbors[start] == node {
+            return self.data.weights[start];
         }
-        
+
         // Binary search since neighbors are sorted
-        match self.neighbors[start..end].binary_search(&node) {
-            Ok(pos) => self.weights[start + pos],
+        match self.data.neighbors[start..end].binary_search(&node) {
+            Ok(pos) => self.data.weights[start + pos],
             Err(_) => E::zero(),
         }
     }
 
-    pub fn community_internal_weight(&self, community: usize, grouping: &impl NetworkGrouping) -> E {
+    pub fn community_internal_weight(
+        &self,
+        community: usize,
+        grouping: &impl NetworkGrouping,
+    ) -> E {
         let members = &grouping.get_group_members()[community];
         let mut total_weight = E::zero();
-        
+
         // Use parallel processing for large communities
         if members.len() > 100 {
-            total_weight = members.par_iter()
+            total_weight = members
+                .par_iter()
                 .map(|&node| {
                     let mut internal_weight = E::zero();
                     for (neighbor, weight) in self.neighbors(node) {
@@ -497,26 +527,23 @@ where
                 }
             }
         }
-        
+
         total_weight
     }
 
     pub fn community_total_strength(&self, community: usize, grouping: &impl NetworkGrouping) -> E {
         let members = &grouping.get_group_members()[community];
-        
+
         if members.len() > 50 {
             // Parallel for large communities
-            members.par_iter()
-                .map(|&node| self.strength(node))
-                .sum()
+            members.par_iter().map(|&node| self.strength(node)).sum()
         } else {
-            members.iter()
+            members
+                .iter()
                 .map(|&node| self.strength(node))
                 .fold(E::zero(), |acc, x| acc + x)
         }
     }
-
-    
 }
 
 /// High-performance iterator over neighbors and edge weights.

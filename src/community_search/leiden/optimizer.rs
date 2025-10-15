@@ -3,7 +3,10 @@
 //! Contains the core optimization logic for the Leiden community detection algorithm,
 //! including node movement, community merging, and partition refinement strategies.
 
-use std::{collections::VecDeque, time::Instant};
+use std::{
+    collections::VecDeque,
+    time::{Duration, Instant},
+};
 
 use anyhow::Ok;
 use num_traits::Float;
@@ -12,7 +15,11 @@ use rand_chacha::ChaCha8Rng;
 use single_utilities::traits::FloatOpsTS;
 
 use crate::{
-    community_search::leiden::{ConsiderComms, LeidenConfig, partition::VertexPartition},
+    community_search::leiden::{
+        ConsiderComms, LeidenConfig,
+        parallel::{ConflictFreeBatcher, ParallelEvaluator},
+        partition::VertexPartition,
+    },
     network::{CSRNetwork, grouping::NetworkGrouping},
 };
 
@@ -195,110 +202,105 @@ impl LeidenOptimizer {
     /// Evaluates the quality improvement for moving a node to each candidate
     /// community and returns the community and improvement of the best move.
     fn find_best_community_move<N, G, P>(
-    &self,
-    v: usize,
-    v_comm: usize,
-    comms: &[usize],
-    partitions: &mut [P], // Changed to mutable slice
-    layer_weights: &[N],
-    max_comm_size: Option<usize>,
-) -> anyhow::Result<(usize, N)>
-where
-    N: FloatOpsTS + 'static,
-    G: NetworkGrouping,
-    P: VertexPartition<N, G>,
-{
-    let mut max_comm = v_comm;
-    let time = Instant::now();
-    // println!("Finding best community move: {:?}", time.elapsed());
+        &self,
+        v: usize,
+        v_comm: usize,
+        comms: &[usize],
+        partitions: &mut [P],
+        layer_weights: &[N],
+        max_comm_size: Option<usize>,
+    ) -> anyhow::Result<(usize, N)>
+    where
+        N: FloatOpsTS + 'static,
+        G: NetworkGrouping,
+        P: VertexPartition<N, G>,
+    {
+        let mut max_comm = v_comm;
+        let time = Instant::now();
+        // println!("Finding best community move: {:?}", time.elapsed());
 
-    // Pre-compute these values once instead of in the loop
-    let v_comm_size = partitions[0].csize(v_comm);
-    let epsilon_threshold = N::from(10.0).unwrap() * <N as Float>::epsilon();
+        // Pre-compute these values once instead of in the loop
+        let v_comm_size = partitions[0].csize(v_comm);
+        let epsilon_threshold = N::from(10.0).unwrap() * <N as Float>::epsilon();
 
-    let mut max_improv = if let Some(max_size) = max_comm_size {
-        if max_size < v_comm_size {
-            <N as Float>::neg_infinity()
+        let mut max_improv = if let Some(max_size) = max_comm_size {
+            if max_size < v_comm_size {
+                <N as Float>::neg_infinity()
+            } else {
+                epsilon_threshold
+            }
         } else {
             epsilon_threshold
+        };
+
+        const V_SIZE: usize = 1;
+
+        if comms.is_empty() {
+            return Ok((max_comm, max_improv));
         }
-    } else {
-        epsilon_threshold
-    };
 
-    const V_SIZE: usize = 1; // Made it a const for better optimization
+        // println!("Prefiltering valid comms {:?}", time.elapsed());
+        let valid_comms: Vec<usize> = if let Some(max_size) = max_comm_size {
+            comms
+                .iter()
+                .copied()
+                .filter(|&comm| partitions[0].csize(comm) + V_SIZE <= max_size)
+                .collect()
+        } else {
+            comms.to_vec()
+        };
+        // println!("Filtered valid comms: {:?}", time.elapsed());
 
-    // Early exit if no communities to check
-    if comms.is_empty() {
-        return Ok((max_comm, max_improv));
-    }
-    
-    // println!("Prefiltering valid comms {:?}", time.elapsed());
-    // Pre-filter communities by size constraint to avoid repeated checks
-    let valid_comms: Vec<usize> = if let Some(max_size) = max_comm_size {
-        comms
-            .iter()
-            .copied()
-            .filter(|&comm| partitions[0].csize(comm) + V_SIZE <= max_size)
-            .collect()
-    } else {
-        comms.to_vec()
-    };
-    // println!("Filtered valid comms: {:?}", time.elapsed());
-
-    // Early exit if no valid communities
-    if valid_comms.is_empty() {
-        return Ok((max_comm, max_improv));
-    }
-
-    // Optimized single-layer case
-    if partitions.len() == 1 && layer_weights[0] == N::one() {
-        // println!("checking valid comms: {:?}", time.elapsed());
-        
-        // Get mutable reference to the single partition
-        let partition = &mut partitions[0];
-        
-        for &comm in &valid_comms {
-            let t = Instant::now();
-            let possible_improv = partition.diff_move(v, comm);
-            // println!("Executed diff move, took: {:?}", t.elapsed());
-            
-            if possible_improv > max_improv {
-                max_comm = comm;
-                max_improv = possible_improv;
-            }
+        if valid_comms.is_empty() {
+            return Ok((max_comm, max_improv));
         }
-    } else {
-        // Multi-layer case
-        for &comm in &valid_comms {
-            let mut possible_improv = N::zero();
 
-            for layer_idx in 0..partitions.len() {
-                // Get mutable reference to current partition
-                let layer_improv = partitions[layer_idx].diff_move(v, comm);
-                possible_improv += layer_weights[layer_idx] * layer_improv;
+        // Optimized single-layer case
+        if partitions.len() == 1 && layer_weights[0] == N::one() {
+            // println!("checking valid comms: {:?}", time.elapsed());
 
-                // Early termination optimization
-                if possible_improv + epsilon_threshold < max_improv {
-                    let remaining_positive = layer_weights[layer_idx + 1..]
-                        .iter()
-                        .all(|&w| w >= N::zero());
+            let partition = &mut partitions[0];
 
-                    if remaining_positive && layer_improv <= N::zero() {
-                        break;
-                    }
+            for &comm in &valid_comms {
+                let t = Instant::now();
+                let possible_improv = partition.diff_move(v, comm);
+                // println!("Executed diff move, took: {:?}", t.elapsed());
+
+                if possible_improv > max_improv {
+                    max_comm = comm;
+                    max_improv = possible_improv;
                 }
             }
+        } else {
+            // Multi-layer case
+            for &comm in &valid_comms {
+                let mut possible_improv = N::zero();
 
-            if possible_improv > max_improv {
-                max_comm = comm;
-                max_improv = possible_improv;
+                for layer_idx in 0..partitions.len() {
+                    let layer_improv = partitions[layer_idx].diff_move(v, comm);
+                    possible_improv += layer_weights[layer_idx] * layer_improv;
+
+                    // Early termination optimization
+                    if possible_improv + epsilon_threshold < max_improv {
+                        let remaining_positive = layer_weights[layer_idx + 1..]
+                            .iter()
+                            .all(|&w| w >= N::zero());
+
+                        if remaining_positive && layer_improv <= N::zero() {
+                            break;
+                        }
+                    }
+                }
+
+                if possible_improv > max_improv {
+                    max_comm = comm;
+                    max_improv = possible_improv;
+                }
             }
         }
-    }
 
-    Ok((max_comm, max_improv))
-}
+        Ok((max_comm, max_improv))
+    }
 
     /// Collects candidate communities that a node can potentially move to.
     ///
@@ -434,7 +436,9 @@ where
 
         for partition in partitions.iter() {
             if partition.node_count() != n {
-                return Err(anyhow::anyhow!("Number of nodes are not equal for all graphs."));
+                return Err(anyhow::anyhow!(
+                    "Number of nodes are not equal for all graphs."
+                ));
             }
         }
 
@@ -572,6 +576,261 @@ where
             partitions[0].renumber_communities_fixed(&fixed_nodes, &fixed_membership);
         }
 
+        let membership = partitions[0].membership_vector();
+        for partition in partitions.iter_mut().skip(1) {
+            partition.set_membership(&membership);
+        }
+
+        Ok(total_improv)
+    }
+
+    fn move_nodes_parallel<N, G, P>(
+        &mut self,
+        partitions: &mut [P],
+        layer_weights: &[N],
+        is_membership_fixed: &[bool],
+        consider_comms: ConsiderComms,
+        consider_empty_community: bool,
+        max_comm_size: Option<usize>,
+    ) -> anyhow::Result<N>
+    where
+        N: FloatOpsTS + 'static,
+        G: NetworkGrouping + Clone + Default,
+        P: VertexPartition<N, G>,
+    {
+        let n = partitions[0].node_count();
+        let network = partitions[0].network().clone();
+
+        let mut total_improv = N::zero();
+        let mut is_node_stable = is_membership_fixed.to_vec();
+
+        let mut nodes: Vec<usize> = (0..n).filter(|&v| !is_membership_fixed[v]).collect();
+        nodes.shuffle(&mut self.rng);
+
+        let mut pending_nodes: VecDeque<usize> = nodes.into();
+        let batcher = ConflictFreeBatcher::new(10_000);
+
+        const MIN_PARALLEL_BATCH_SIZE: usize = 50;
+        const MIN_PARALLEL_NODES: usize = 100;
+
+        let mut total_candidates_checked = 0usize;
+        let mut total_nodes_evaluated = 0usize;
+
+        let mut batch_round = 0;
+
+        while !pending_nodes.is_empty() {
+            let current_nodes: Vec<usize> = pending_nodes.drain(..).collect();
+
+            if current_nodes.len() < MIN_PARALLEL_NODES {
+                println!("  Sequential evaluation: {} nodes", current_nodes.len());
+
+                let seq_start = Instant::now();
+                let mut seq_beneficial = 0;
+
+                for node in current_nodes {
+                    total_nodes_evaluated += 1;
+
+                    let current_comm = partitions[0].membership(node);
+
+                    let mut comm_added = vec![false; partitions[0].community_count()];
+                    let mut candidates = Vec::new();
+
+                    self.collect_candidate_communities(
+                        node,
+                        partitions,
+                        consider_comms,
+                        &mut candidates,
+                        &mut comm_added,
+                    );
+
+                    total_candidates_checked += candidates.len();
+
+                    if consider_empty_community && partitions[0].cnodes(current_comm) > 1 {
+                        let empty_comm = partitions[0].get_empty_community();
+                        candidates.push(empty_comm);
+                    }
+
+                    let (best_comm, improvement) = self.find_best_community_move(
+                        node,
+                        current_comm,
+                        &candidates,
+                        partitions,
+                        layer_weights,
+                        max_comm_size,
+                    )?;
+
+                    if best_comm != current_comm && improvement > N::zero() {
+                        seq_beneficial += 1;
+                        total_improv += improvement;
+
+                        for partition in partitions.iter_mut() {
+                            partition.move_node(node, best_comm);
+                        }
+
+                        is_node_stable[node] = true;
+
+                        for (neighbor, _) in network.neighbors(node) {
+                            if is_node_stable[neighbor]
+                                && partitions[0].membership(neighbor) != best_comm
+                                && !is_membership_fixed[neighbor]
+                            {
+                                pending_nodes.push_back(neighbor);
+                                is_node_stable[neighbor] = false;
+                            }
+                        }
+                    }
+                }
+
+                println!(
+                    "    Sequential: {} beneficial moves in {:?}",
+                    seq_beneficial,
+                    seq_start.elapsed()
+                );
+                batch_round += 1;
+                continue;
+            }
+
+            let batches = batcher.create_batches(&current_nodes, &network, &is_node_stable);
+
+            println!(
+                "  Batch #{}: {} nodes -> {} conflict-free batches",
+                batch_round,
+                current_nodes.len(),
+                batches.len()
+            );
+
+            for (batch_idx, batch) in batches.iter().enumerate() {
+                if batch.is_empty() {
+                    continue;
+                }
+
+                let batch_start = Instant::now();
+
+                if batch.len() < MIN_PARALLEL_BATCH_SIZE {
+                    let mut seq_beneficial = 0;
+
+                    for &node in batch.iter() {
+                        total_nodes_evaluated += 1;
+
+                        let current_comm = partitions[0].membership(node);
+
+                        let mut comm_added = vec![false; partitions[0].community_count()];
+                        let mut candidates = Vec::new();
+
+                        self.collect_candidate_communities(
+                            node,
+                            partitions,
+                            consider_comms,
+                            &mut candidates,
+                            &mut comm_added,
+                        );
+
+                        total_candidates_checked += candidates.len();
+
+                        if consider_empty_community && partitions[0].cnodes(current_comm) > 1 {
+                            let empty_comm = partitions[0].get_empty_community();
+                            candidates.push(empty_comm);
+                        }
+
+                        let (best_comm, improvement) = self.find_best_community_move(
+                            node,
+                            current_comm,
+                            &candidates,
+                            partitions,
+                            layer_weights,
+                            max_comm_size,
+                        )?;
+
+                        if best_comm != current_comm && improvement > N::zero() {
+                            seq_beneficial += 1;
+                            total_improv += improvement;
+
+                            for partition in partitions.iter_mut() {
+                                partition.move_node(node, best_comm);
+                            }
+
+                            is_node_stable[node] = true;
+
+                            for (neighbor, _) in network.neighbors(node) {
+                                if is_node_stable[neighbor]
+                                    && partitions[0].membership(neighbor) != best_comm
+                                    && !is_membership_fixed[neighbor]
+                                {
+                                    pending_nodes.push_back(neighbor);
+                                    is_node_stable[neighbor] = false;
+                                }
+                            }
+                        }
+                    }
+
+                    if batch_idx < 3 || seq_beneficial > 0 {
+                        println!(
+                            "    Sub-batch #{} (seq): {} nodes, {} beneficial (took {:?})",
+                            batch_idx,
+                            batch.len(),
+                            seq_beneficial,
+                            batch_start.elapsed()
+                        );
+                    }
+                } else {
+                    let proposed_moves = ParallelEvaluator::evaluate_batch(
+                        batch,
+                        partitions,
+                        layer_weights,
+                        consider_comms,
+                        consider_empty_community,
+                        max_comm_size,
+                    );
+
+                    total_nodes_evaluated += batch.len();
+
+                    let mut beneficial_count = 0;
+                    for proposed in proposed_moves {
+                        if proposed.is_beneficial() {
+                            beneficial_count += 1;
+                            total_improv += proposed.improvement;
+
+                            for partition in partitions.iter_mut() {
+                                partition.move_node(proposed.node, proposed.to_comm);
+                            }
+
+                            is_node_stable[proposed.node] = true;
+
+                            for (neighbor, _) in network.neighbors(proposed.node) {
+                                if is_node_stable[neighbor]
+                                    && partitions[0].membership(neighbor) != proposed.to_comm
+                                    && !is_membership_fixed[neighbor]
+                                {
+                                    pending_nodes.push_back(neighbor);
+                                    is_node_stable[neighbor] = false;
+                                }
+                            }
+                        }
+                    }
+
+                    if batch_idx < 3 || beneficial_count > 0 {
+                        println!(
+                            "    Sub-batch #{} (par): {} nodes, {} beneficial (took {:?})",
+                            batch_idx,
+                            batch.len(),
+                            beneficial_count,
+                            batch_start.elapsed()
+                        );
+                    }
+                }
+            }
+
+            batch_round += 1;
+        }
+
+        if total_nodes_evaluated > 0 {
+            println!(
+                "  Avg candidates per node: {:.1}",
+                total_candidates_checked as f64 / total_nodes_evaluated as f64
+            );
+        }
+
+        partitions[0].renumber_communities();
         let membership = partitions[0].membership_vector();
         for partition in partitions.iter_mut().skip(1) {
             partition.set_membership(&membership);
@@ -1158,13 +1417,12 @@ where
         while aggregate_further {
             println!("Starting iteration {:?}, time: {:?}", i, time.elapsed());
             let improvement = match self.config.optimise_routine {
-                super::OptimiseRoutine::MoveNodes => self.move_nodes(
+                super::OptimiseRoutine::MoveNodes => self.move_nodes_parallel(
                     &mut collapsed_partitions,
                     layer_weights,
                     &is_collapsed_membership_fixed,
                     self.config.consider_comms,
                     self.config.consider_empty_community,
-                    false,
                     self.config.max_community_size,
                 )?,
                 super::OptimiseRoutine::MergeNodes => self.merge_nodes(
