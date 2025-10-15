@@ -127,6 +127,42 @@ where
     fn node_strength(&self, node: usize) -> N {
         self.network.strength(node)
     }
+
+    pub fn diff_move_readonly(&self, node: usize, new_community: usize) -> N {
+        let old_comm = self.grouping.get_group(node);
+        if new_community == old_comm {
+            return N::zero();
+        }
+        
+        if self.total_weight == N::zero() {
+            return N::zero();
+        }
+
+        let two_m = N::from(2.0).unwrap() * self.total_weight;
+        
+        let w_to_old = self.weight_to_comm(node, old_comm);
+        let w_to_new = if new_community < self.grouping.group_count() {
+            self.weight_to_comm(node, new_community)
+        } else {
+            N::zero() 
+        };
+        
+
+        let k_i = self.network.strength(node);
+        
+        let k_old = self.total_weight_from_comm(old_comm);
+        let k_new = if new_community < self.grouping.group_count() {
+            self.total_weight_from_comm(new_community)
+        } else {
+            N::zero()
+        };
+        
+        
+        let delta_edges = w_to_new - w_to_old;
+        let delta_expected = (k_new * k_i - (k_old - k_i) * k_i) / two_m;
+        
+        (delta_edges - delta_expected) / self.total_weight
+    }
 }
 
 impl<N, G> VertexPartition<N, G> for ModularityPartition<N, G>
@@ -224,5 +260,9 @@ where
     
     fn create_like_with_membership(&self, network: CSRNetwork<N, N>, membership: &[usize]) -> Self {
         Self::create_with_membership(network, membership)
+    }
+    
+    fn diff_move_readonly(&self, node: usize, new_community: usize) -> N {
+        self.diff_move_readonly(node, new_community)
     }
 }

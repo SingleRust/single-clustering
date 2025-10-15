@@ -188,5 +188,8 @@ where
         
         comms.into_iter().collect()
     }
+
+    fn diff_move_readonly(&self, node: usize, new_community: usize) -> N;
+
 }
 

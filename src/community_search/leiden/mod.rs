@@ -7,6 +7,7 @@
 pub mod partition;
 mod optimizer;
 pub use optimizer::LeidenOptimizer;
+mod parallel;
 
 /// Strategy for selecting communities to consider during optimization.
 #[derive(Debug, Clone, Copy, PartialEq)]
