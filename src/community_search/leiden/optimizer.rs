@@ -434,7 +434,7 @@ where
 
         for partition in partitions.iter() {
             if partition.node_count() != n {
-                panic!("Number of nodes are not equal for all graphs.");
+                return Err(anyhow::anyhow!("Number of nodes are not equal for all graphs."));
             }
         }
 

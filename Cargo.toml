@@ -11,14 +11,14 @@ description = "A high-performance network clustering library implementing commun
 
 
 [dependencies]
-anyhow = "1.0.98"
+anyhow = "1.0.100"
 kiddo = {version = "5.2.2" }
 nalgebra-sparse = "0.10.0"
 ndarray = {version = "0.16.1" , features = ["rayon"]}
 num-traits = "0.2.19"
 petgraph = { version = "0.8.2", features = ["rayon"] }
 rayon = "1.10.0"
-single-utilities = "0.8.5"
+single-utilities = "0.8.6"
 rand = "0.9.0"
 rand_chacha = {version = "0.9.0"}
 hnsw_rs = {version = "0.3.2", features = ["simdeez_f"]}

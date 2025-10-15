@@ -6,8 +6,7 @@
 use single_utilities::traits::FloatOpsTS;
 
 use crate::{
-    community_search::leiden::partition::VertexPartition,
-    network::{grouping::NetworkGrouping, CSRNetwork},
+    community_search::leiden::partition::VertexPartition, neighborhood, network::{grouping::NetworkGrouping, CSRNetwork}
 };
 
 /// Reichardt-Bornholdt configuration model partition for multi-resolution community detection.
@@ -152,19 +151,6 @@ where
         self.community_internal_weights_dirty = true;
     }
 
-    /// Fast weight calculation from node to community.
-    #[inline]
-    fn weight_to_comm(&self, node: usize, community: usize) -> N {
-        let mut weight = N::zero();
-        // Use iterator directly to avoid function call overhead
-        for (neighbor, edge_weight) in self.network.neighbors(node) {
-            if self.grouping.get_group(neighbor) == community {
-                weight += edge_weight;
-            }
-        }
-        weight
-    }
-
     /// Gets cached community strength (fast lookup).
     #[inline]
     fn get_community_strength(&self, community: usize) -> N {
@@ -187,6 +173,52 @@ where
     fn node_strength(&self, node: usize) -> N {
         self.node_strengths[node]
     }
+
+    pub fn diff_move_readonly(&self, node: usize, new_community: usize) -> N {
+        let old_comm = self.grouping.get_group(node);
+        if new_community == old_comm {
+            return N::zero();
+        }
+
+        if self.two_m == N::zero() {
+            return N::zero();
+        }
+
+        let k_i = self.node_strengths[node];
+        let self_weight = self.node_self_weight(node);
+
+        let w_to_old = self.weight_to_comm(node, old_comm);
+        let w_to_new = if new_community < self.grouping.group_count() {
+            self.weight_to_comm(node, new_community)
+        } else {
+            N::zero()
+        };
+
+        let k_old = self.compute_total_weight_from_comm_uncached(old_comm);
+        let k_new = if new_community < self.grouping.group_count() {
+            self.compute_total_weight_from_comm_uncached(new_community)
+        } else {
+            N::zero()
+        };
+
+        let delta_w_in = (w_to_new + self_weight) - w_to_old;
+
+        let delta_k_squared = N::from(2.0).unwrap() * k_i * (k_new - k_old + k_i);
+        let delta_null_model = self.resolution * delta_k_squared / self.two_m;
+
+        delta_w_in - delta_null_model 
+    }
+
+    #[inline]
+    fn weight_to_comm(&self, node: usize, community: usize) -> N {
+        let mut weight = N::zero();
+        for (neighbor, edge_weight) in self.network.neighbors(node) {
+            if self.grouping.get_group(neighbor) == community {
+                weight += edge_weight;
+            }
+        }
+        weight
+    } 
 
 }
 
@@ -256,6 +288,15 @@ where
     
     fn create_like_with_membership(&self, network: CSRNetwork<N, N>, membership: &[usize]) -> Self {
         Self::with_membership_and_resolution(network, membership, self.resolution)
+    }
+    
+    fn diff_move_readonly(&self, node: usize, new_community: usize) -> N {
+        self.diff_move_readonly(node, new_community)
+    }
+
+    fn add_empty_community(&mut self) {
+        self.community_strengths.push(N::zero());
+        self.community_internal_weights.push(N::zero());
     }
 }
 
