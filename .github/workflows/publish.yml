@@ -1,21 +1,55 @@
 name: Publish to crates.io
 
+# tags only — this used to fire on every push to main
 on:
   push:
-    branches:
-      - main
     tags:
       - 'v*'
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  publish:
+  # publishing can't be undone, so re-check here rather than trust an earlier CI run
+  verify:
+    name: Verify
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
-      - uses: actions-rs/toolchain@v1
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
-          override: true
-      - uses: katyo/publish-crates@v2
-        with:
-          registry-token: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --no-default-features --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --no-default-features --release
+
+      - name: Tag matches Cargo.toml version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          manifest=$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')
+          if [ "$tag" != "$manifest" ]; then
+            echo "tag v$tag does not match Cargo.toml version $manifest" >&2
+            exit 1
+          fi
+
+      - name: Package
+        run: cargo package --no-default-features
+
+  publish:
+    name: Publish
+    needs: [verify]
+    runs-on: ubuntu-latest
+    # add a required reviewer to this environment for a manual confirm step
+    environment: crates-io
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Publish
+        run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
