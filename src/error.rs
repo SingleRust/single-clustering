@@ -76,6 +76,15 @@ pub enum ClusteringError {
         /// The offending position.
         position: (u32, u32),
     },
+    /// No triangulation exists for the given points — they are collinear, or fewer than
+    /// three distinct positions.
+    ///
+    /// Reported rather than returning an edgeless graph, which would cluster into singletons
+    /// and look like a result.
+    DegenerateTriangulation {
+        /// How many points were supplied.
+        n_points: usize,
+    },
     /// Parallel coordinate arrays had different lengths.
     CoordinateLengthMismatch {
         /// Length of the first array.
@@ -133,6 +142,11 @@ impl fmt::Display for ClusteringError {
                 f,
                 "nodes {} and {} both sit at lattice position ({row}, {col})",
                 nodes.0, nodes.1
+            ),
+            Self::DegenerateTriangulation { n_points } => write!(
+                f,
+                "no Delaunay triangulation exists for these {n_points} points: they are \
+                 collinear, or fewer than three distinct positions"
             ),
             Self::CoordinateLengthMismatch { got, expected } => {
                 write!(f, "coordinate array has length {got}, expected {expected}")

@@ -23,9 +23,11 @@
 //!
 //! Neither affects `array_row` / `array_col`, which is what [`lattice_graph`] wants.
 
+pub mod delaunay;
 pub(crate) mod grid;
 pub mod lattice;
 pub mod points;
 
+pub use delaunay::{HullPruning, delaunay_graph};
 pub use lattice::{Lattice, lattice_graph, visium_isometric_coords};
 pub use points::{SpatialWeight, Symmetry, knn_graph, radius_graph};

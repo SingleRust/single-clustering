@@ -44,6 +44,12 @@ pub enum SpatialWeight {
 }
 
 impl SpatialWeight {
+    /// Weight for an edge of the given squared length.
+    #[inline]
+    pub(crate) fn of(self, distance_sq: f64) -> f64 {
+        self.apply(distance_sq)
+    }
+
     #[inline]
     fn apply(self, distance_sq: f64) -> f64 {
         match self {
