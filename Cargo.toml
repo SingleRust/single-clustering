@@ -1,6 +1,6 @@
 [package]
 name = "single-clustering"
-version = "0.6.1"
+version = "0.7.0"
 edition = "2024"
 authors = ["Ian F. Diks"]
 homepage = "https://singlerust.com"
@@ -9,16 +9,30 @@ license-file = "LICENSE.md"
 readme = "README.md"
 description = "A high-performance network clustering library implementing community detection algorithms like Louvain and Leiden. Features efficient graph representation, abstract grouping systems, and K-NN graph creation from high-dimensional data. Provides parallel computation support via Rayon for handling large networks."
 
+[features]
+default = ["knn"]
+# k-nearest-neighbour graph construction from high-dimensional data. Split out so the
+# clustering core can be built and tested without the HNSW/kd-tree stack, which does not
+# compile on every target.
+knn = ["dep:hnsw_rs", "dep:kiddo", "dep:ndarray"]
 
 [dependencies]
 anyhow = "1.0.100"
-kiddo = {version = "5.2.2" }
 nalgebra-sparse = "0.10.0"
-ndarray = {version = "0.16.1" , features = ["rayon"]}
 num-traits = "0.2.19"
-petgraph = { version = "0.8.2", features = ["rayon"] }
 rayon = "1.10.0"
 single-utilities = "0.8.6"
 rand = "0.9.0"
-rand_chacha = {version = "0.9.0"}
-hnsw_rs = {version = "0.3.2", features = ["simdeez_f"]}
+rand_chacha = { version = "0.9.0" }
+
+kiddo = { version = "5.2.2", optional = true }
+ndarray = { version = "0.16.1", features = ["rayon"], optional = true }
+hnsw_rs = { version = "0.3.2", features = ["simdeez_f"], optional = true }
+
+[dev-dependencies]
+serde_json = "1.0"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "leiden"
+harness = false

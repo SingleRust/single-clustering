@@ -83,8 +83,7 @@ pub trait NetworkGrouping: Debug + Send + Sync {
 /// - O(1) group assignment and lookup
 /// - Cached group sizes with lazy updates
 /// - Bulk operations for efficiency
-#[derive(Debug, Clone)]
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub struct VectorGrouping {
     /// Vector storing the group assignment for each node
     assignments: Vec<usize>,

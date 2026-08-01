@@ -1,157 +1,406 @@
-//! # CSR Network Module
+//! CSR storage for a weighted, undirected graph.
 //!
-//! This module provides a Compressed Sparse Row (CSR) representation of networks/graphs
-//! optimized for clustering algorithms. It supports weighted, undirected graphs with
-//! efficient neighbor iteration and community detection operations.
+//! ## Weight conventions
+//!
+//! igraph/leidenalg conventions. Every quality function here depends on them:
+//!
+//! - edge `{u, v}` of weight `w` → `w` to `strength(u)`, `w` to `strength(v)`, `w` to
+//!   [`total_weight`](CSRNetwork::total_weight)
+//! - **self-loop** on `v` of weight `w` → **`2w`** to `strength(v)`, `w` to `total_weight`
+//!
+//! Which gives the invariant `Σ strength(v) == 2 · total_weight`. This matters because
+//! [`aggregate`](CSRNetwork::aggregate) packs a community's whole internal weight into one
+//! self-loop — get the degree contribution wrong and the null model silently dies above
+//! level 0.
+//!
+//! ## Memory layout
+//!
+//! `u32` ids and `f32` weights, so 8 bytes per stored entry / 16 per undirected edge. Per-node
+//! data and all arithmetic stay `f64` — weights are read at `f32`, never accumulated at it.
+//! Node weights especially, since after aggregation they count original nodes and would lose
+//! integer precision past 2^24.
+//!
+//! ~12 GB of adjacency at 75M nodes rather than ~24. [`from_csr_parts`](CSRNetwork::from_csr_parts)
+//! takes buffers you already have without copying; [`from_edges`](CSRNetwork::from_edges) also
+//! needs the caller's edge list resident, but builds in place rather than doubling.
 
-use core::num;
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use nalgebra_sparse::CsrMatrix;
-use rand::random;
-use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use single_utilities::traits::FloatOpsTS;
 
-use crate::network::grouping::{self, NetworkGrouping};
+use crate::error::{ClusteringError, Result};
+use crate::network::grouping::NetworkGrouping;
 
-/// A compressed sparse row (CSR) representation of a weighted, undirected network.
-///
-/// This structure provides efficient storage and access patterns for networks used in
-/// clustering algorithms. Neighbors are sorted for each node to enable binary search
-/// for edge weight lookups.
-///
-/// # Type Parameters
-/// * `N` - Node weight type (e.g., f32, f64)
-/// * `E` - Edge weight type (e.g., f32, f64)
+/// Largest addressable node id. `u32` adjacency caps the graph at ~4.29 billion nodes.
+pub const MAX_NODES: usize = u32::MAX as usize;
+
 #[derive(Debug, Clone)]
-pub struct CSRNetworkData<N, E> {
+struct CSRNetworkData {
+    /// Offsets into `neighbors`/`weights`; length `n_nodes + 1`. Stays `usize`, since it
+    /// indexes an array with up to `2m` entries.
     node_ptrs: Vec<usize>,
-    neighbors: Vec<usize>,
-    weights: Vec<E>,
-
-    node_weights: Vec<N>,
-
-    degrees: Vec<usize>,
-    strengths: Vec<E>,
-    total_weight: E,
+    /// Neighbour ids, strictly increasing within each node's slice.
+    neighbors: Vec<u32>,
+    /// Edge weights, parallel to `neighbors`.
+    weights: Vec<f32>,
+    /// Per-node weights (aggregate node size). Summed by [`CSRNetwork::aggregate`].
+    node_weights: Vec<f64>,
+    /// Per-node sum of incident edge weights, self-loops counted twice.
+    strengths: Vec<f64>,
+    /// Sum of edge weights, each undirected edge counted once.
+    total_weight: f64,
+    /// Number of distinct undirected edges, self-loops included.
     edge_count: usize,
-}
-
-#[derive(Debug, Clone)]
-pub struct CSRNetwork<N, E> {
-    data: Arc<CSRNetworkData<N, E>>,
-}
-
-impl<N, E> CSRNetwork<N, E>
-where
-    N: FloatOpsTS + 'static,
-    E: FloatOpsTS + 'static,
-{
-    /// Creates a CSR network from a list of edges and node weights.
+    /// Whether any node carries a self-loop.
     ///
-    /// Constructs the compressed sparse row representation by building adjacency lists,
-    /// sorting neighbors, and computing node degrees and strengths.
+    /// Lets `self_loop_weight` skip its binary search on graphs without any — which the level-0
+    /// graph, where most node visits happen, normally is. That search was ~4% of runtime.
+    any_self_loops: bool,
+}
+
+/// A weighted, undirected graph in compressed-sparse-row form.
+///
+/// Cloning is cheap: the underlying data is shared behind an [`Arc`]. See the module-level
+/// documentation for the weight conventions and memory layout this type guarantees.
+#[derive(Debug, Clone)]
+pub struct CSRNetwork {
+    data: Arc<CSRNetworkData>,
+}
+
+/// Iterator over `(neighbor, weight)` pairs for one node.
+///
+/// Yields `usize`/`f64` regardless of the narrower storage types, so callers can index
+/// directly and do arithmetic at full precision.
+pub struct CSRNeighborIterator<'a> {
+    neighbors: std::slice::Iter<'a, u32>,
+    weights: std::slice::Iter<'a, f32>,
+}
+
+impl Iterator for CSRNeighborIterator<'_> {
+    type Item = (usize, f64);
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        let n = *self.neighbors.next()?;
+        let w = *self.weights.next()?;
+        Some((n as usize, w as f64))
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.neighbors.size_hint()
+    }
+}
+
+impl ExactSizeIterator for CSRNeighborIterator<'_> {}
+
+impl CSRNetwork {
+    /// Builds a graph from an edge list, giving every node unit weight.
+    ///
+    /// Each undirected edge should be supplied **once**; `(u, v, w)` and `(v, u, w)` are two
+    /// parallel edges, not one. Parallel edges between the same pair are merged by summing
+    /// their weights. A `(v, v, w)` entry is a self-loop of weight `w`.
+    pub fn from_edges<W>(n_nodes: usize, edges: &[(usize, usize, W)]) -> Result<Self>
+    where
+        W: FloatOpsTS + 'static,
+    {
+        Self::from_edges_with_node_weights(edges, vec![1.0; n_nodes])
+    }
+
+    /// Builds a graph from an edge list with explicit node weights.
+    ///
+    /// Node weight is a node's "size", and what CPM measures communities in. Usually all
+    /// `1.0` straight from data; it starts mattering after [`aggregate`](Self::aggregate),
+    /// where a super-node's weight is the sum of its members'.
+    ///
+    /// Allocates the adjacency arrays once and sorts in place, so peak memory is the graph
+    /// plus the caller's edge list, not double. For very large inputs
+    /// [`from_csr_parts`](Self::from_csr_parts) needs no edge list at all.
+    pub fn from_edges_with_node_weights<W>(
+        edges: &[(usize, usize, W)],
+        node_weights: Vec<f64>,
+    ) -> Result<Self>
+    where
+        W: FloatOpsTS + 'static,
+    {
+        let n_nodes = node_weights.len();
+        validate_node_weights(&node_weights)?;
+        if n_nodes > MAX_NODES {
+            return Err(ClusteringError::TooManyNodes { n_nodes });
+        }
+
+        // pass 1: validate and count slots per node
+        let mut counts = vec![0usize; n_nodes];
+        for &(from, to, w) in edges {
+            check_edge(from, to, w.to_f64().unwrap_or(f64::NAN), n_nodes)?;
+            counts[from] += 1;
+            if from != to {
+                counts[to] += 1;
+            }
+        }
+
+        let mut node_ptrs = vec![0usize; n_nodes + 1];
+        for v in 0..n_nodes {
+            node_ptrs[v + 1] = node_ptrs[v] + counts[v];
+        }
+        let slots = node_ptrs[n_nodes];
+
+        // pass 2: scatter into place; `cursor` is the write position in each slice
+        let mut neighbors = vec![0u32; slots];
+        let mut weights = vec![0.0f32; slots];
+        let mut cursor = node_ptrs.clone();
+        for &(from, to, w) in edges {
+            let w = w.to_f64().unwrap() as f32;
+            neighbors[cursor[from]] = to as u32;
+            weights[cursor[from]] = w;
+            cursor[from] += 1;
+            if from != to {
+                neighbors[cursor[to]] = from as u32;
+                weights[cursor[to]] = w;
+                cursor[to] += 1;
+            }
+        }
+        drop(cursor);
+
+        Self::finish(node_ptrs, neighbors, weights, node_weights, true)
+    }
+
+    /// Builds a graph directly from CSR arrays, taking ownership of them.
+    ///
+    /// The low-memory entry point: nothing proportional to the edge count is allocated, so a
+    /// connectivity matrix you already hold — scanpy's `connectivities`, say — becomes a graph
+    /// with no copy.
+    ///
+    /// Must be the **full symmetric** adjacency: if `j` is in row `i`, `i` must be in row `j`
+    /// with the same weight. Rows need not be sorted (they're sorted in place); duplicates
+    /// within a row are summed, and anything summing to zero is dropped.
     ///
     /// # Arguments
-    /// * `edges` - List of (from, to, weight) tuples representing edges
-    /// * `node_weights` - Vector of weights for each node
-    pub fn from_edges(edges: &[(usize, usize, E)], node_weights: Vec<N>) -> Self {
-        let num_nodes = node_weights.len();
-
-        let mut degrees = vec![0; num_nodes];
-        for &(from, to, _) in edges {
-            degrees[from] += 1;
-            if from != to {
-                degrees[to] += 1;
+    /// * `node_ptrs` - row offsets, length `n_nodes + 1`, non-decreasing, last equals
+    ///   `neighbors.len()`
+    /// * `neighbors` - column indices
+    /// * `weights` - values, parallel to `neighbors`
+    /// * `node_weights` - per-node weights, or `None` for unit weights
+    pub fn from_csr_parts(
+        node_ptrs: Vec<usize>,
+        neighbors: Vec<u32>,
+        weights: Vec<f32>,
+        node_weights: Option<Vec<f64>>,
+    ) -> Result<Self> {
+        if node_ptrs.is_empty() {
+            return Err(ClusteringError::InvalidCsr(
+                "node_ptrs must have at least one element".into(),
+            ));
+        }
+        let n_nodes = node_ptrs.len() - 1;
+        if n_nodes > MAX_NODES {
+            return Err(ClusteringError::TooManyNodes { n_nodes });
+        }
+        if neighbors.len() != weights.len() {
+            return Err(ClusteringError::InvalidCsr(format!(
+                "neighbors has {} entries but weights has {}",
+                neighbors.len(),
+                weights.len()
+            )));
+        }
+        if node_ptrs[n_nodes] != neighbors.len() {
+            return Err(ClusteringError::InvalidCsr(format!(
+                "node_ptrs ends at {} but there are {} entries",
+                node_ptrs[n_nodes],
+                neighbors.len()
+            )));
+        }
+        for v in 0..n_nodes {
+            if node_ptrs[v] > node_ptrs[v + 1] {
+                return Err(ClusteringError::InvalidCsr(format!(
+                    "node_ptrs is not non-decreasing at {v}"
+                )));
+            }
+        }
+        for (&u, &w) in neighbors.iter().zip(weights.iter()) {
+            if u as usize >= n_nodes {
+                return Err(ClusteringError::NodeIndexOutOfRange {
+                    node: u as usize,
+                    n_nodes,
+                });
+            }
+            if !w.is_finite() {
+                return Err(ClusteringError::NonFiniteWeight {
+                    edge: (0, u as usize),
+                });
+            }
+            if w < 0.0 {
+                return Err(ClusteringError::NegativeWeight {
+                    edge: (0, u as usize),
+                    weight: w as f64,
+                });
             }
         }
 
-        let total_degree: usize = degrees.iter().sum();
-        let mut node_ptrs = Vec::with_capacity(num_nodes + 1);
-        let mut neighbors = Vec::with_capacity(total_degree);
-        let mut weights = Vec::with_capacity(total_degree);
-        let mut strengths = vec![E::zero(); num_nodes];
-
-        let mut adjacency_lists: Vec<Vec<(usize, E)>> = vec![Vec::new(); num_nodes];
-        for &(from, to, weight) in edges {
-            adjacency_lists[from].push((to, weight));
-            if from != to {
-                adjacency_lists[to].push((from, weight));
+        let node_weights = match node_weights {
+            Some(w) => {
+                if w.len() != n_nodes {
+                    return Err(ClusteringError::NodeWeightLengthMismatch {
+                        got: w.len(),
+                        expected: n_nodes,
+                    });
+                }
+                validate_node_weights(&w)?;
+                w
             }
-        }
+            None => vec![1.0; n_nodes],
+        };
 
-        node_ptrs.push(0);
-        let mut total_weight = E::zero();
+        Self::finish(node_ptrs, neighbors, weights, node_weights, false)
+    }
 
-        for (node, adj_list) in adjacency_lists.into_iter().enumerate() {
-            let mut sorted_adj = adj_list;
-            sorted_adj.sort_by_key(|&(neighbor, _)| neighbor);
+    /// Sorts each row, merges duplicates, compacts, and derives the cached aggregates.
+    ///
+    /// `may_have_gaps` says whether compaction can shrink the arrays. Sorting borrows one
+    /// scratch buffer sized to the largest row, so the temporary is O(max degree), not O(m).
+    fn finish(
+        mut node_ptrs: Vec<usize>,
+        mut neighbors: Vec<u32>,
+        mut weights: Vec<f32>,
+        node_weights: Vec<f64>,
+        may_have_gaps: bool,
+    ) -> Result<Self> {
+        let n_nodes = node_ptrs.len() - 1;
+        let max_degree = (0..n_nodes)
+            .map(|v| node_ptrs[v + 1] - node_ptrs[v])
+            .max()
+            .unwrap_or(0);
+        let mut scratch: Vec<(u32, f32)> = Vec::with_capacity(max_degree);
 
-            for (neighbor, weight) in sorted_adj {
-                neighbors.push(neighbor);
-                weights.push(weight);
-                strengths[node] += weight;
+        let mut strengths = vec![0.0f64; n_nodes];
+        let mut total_weight = 0.0f64;
+        let mut edge_count = 0usize;
+        let mut write = 0usize;
+        let mut any_self_loops = false;
 
-                if node <= neighbor {
-                    total_weight += weight;
+        for v in 0..n_nodes {
+            let (lo, hi) = (node_ptrs[v], node_ptrs[v + 1]);
+            node_ptrs[v] = write;
+
+            scratch.clear();
+            scratch.extend(
+                neighbors[lo..hi]
+                    .iter()
+                    .copied()
+                    .zip(weights[lo..hi].iter().copied()),
+            );
+            scratch.sort_unstable_by_key(|&(u, _)| u);
+
+            let mut i = 0;
+            while i < scratch.len() {
+                let u = scratch[i].0;
+                let mut w = 0.0f64;
+                while i < scratch.len() && scratch[i].0 == u {
+                    w += scratch[i].1 as f64;
+                    i += 1;
+                }
+                // an explicit zero isn't an edge — keeps degree/edge_count honest
+                if w == 0.0 {
+                    continue;
+                }
+                // `write <= lo` always, so this never clobbers unread input
+                debug_assert!(write <= lo + (i - 1));
+                neighbors[write] = u;
+                weights[write] = w as f32;
+                write += 1;
+
+                // self-loops: twice toward strength, once toward total weight
+                let stored = w as f32 as f64;
+                if u as usize == v {
+                    any_self_loops = true;
+                    strengths[v] += 2.0 * stored;
+                } else {
+                    strengths[v] += stored;
+                }
+                if v <= u as usize {
+                    total_weight += stored;
+                    edge_count += 1;
                 }
             }
-            node_ptrs.push(neighbors.len());
+        }
+        node_ptrs[n_nodes] = write;
+
+        if may_have_gaps || write < neighbors.len() {
+            neighbors.truncate(write);
+            weights.truncate(write);
+            neighbors.shrink_to_fit();
+            weights.shrink_to_fit();
         }
 
-        let csr = CSRNetworkData {
+        let data = CSRNetworkData {
             node_ptrs,
             neighbors,
             weights,
             node_weights,
-            degrees,
             strengths,
             total_weight,
-            edge_count: edges.len(),
+            edge_count,
+            any_self_loops,
         };
+        check_degree_sum(&data)?;
 
-        Self {
-            data: Arc::new(csr),
-        }
+        Ok(Self {
+            data: Arc::new(data),
+        })
     }
 
-    /// Creates a CSR network from a CSR matrix and node weights.
+    /// Builds a graph from a sparse adjacency matrix, giving every node unit weight.
     ///
-    /// Converts a nalgebra CSR matrix to the internal CSR network representation,
-    /// handling self-loops and ensuring undirected graph properties.
-    pub fn from_csr_matrix(matrix: CsrMatrix<E>, node_weights: Vec<N>) -> Self {
-        let mut edges = Vec::new();
+    /// The matrix is treated as symmetric: only entries with `row <= col` are read, and a
+    /// diagonal entry `(v, v, w)` becomes a self-loop of weight `w`. Zero entries are skipped.
+    ///
+    /// Allocates an intermediate edge list. For large inputs prefer
+    /// [`from_csr_parts`](Self::from_csr_parts).
+    pub fn from_csr_matrix<W>(matrix: &CsrMatrix<W>) -> Result<Self>
+    where
+        W: FloatOpsTS + 'static,
+    {
+        Self::from_csr_matrix_with_node_weights(matrix, vec![1.0; matrix.nrows()])
+    }
 
+    /// Builds a graph from a sparse adjacency matrix with explicit node weights.
+    pub fn from_csr_matrix_with_node_weights<W>(
+        matrix: &CsrMatrix<W>,
+        node_weights: Vec<f64>,
+    ) -> Result<Self>
+    where
+        W: FloatOpsTS + 'static,
+    {
+        if node_weights.len() != matrix.nrows() {
+            return Err(ClusteringError::NodeWeightLengthMismatch {
+                got: node_weights.len(),
+                expected: matrix.nrows(),
+            });
+        }
+
+        let mut edges = Vec::with_capacity(matrix.nnz() / 2 + 1);
         for (row, col, &weight) in matrix.triplet_iter() {
-            if weight != E::zero() {
-                // Only add upper triangle for undirected graphs to avoid duplicates
-                if row == col {
-                    let tot_w = E::from(2.0).unwrap() * weight;
-                    edges.push((row, col, tot_w));
-                } else if row < col {
-                    edges.push((row, col, weight));
-                }
+            // upper triangle only; the diagonal picks up the self-loop convention later
+            if row <= col && weight != W::zero() {
+                edges.push((row, col, weight));
             }
         }
 
-        Self::from_edges(&edges, node_weights)
+        Self::from_edges_with_node_weights(&edges, node_weights)
     }
 
-    /// Returns an iterator over the neighbors and edge weights of a node.
+    /// Returns an iterator over the `(neighbor, weight)` pairs of a node.
     ///
-    /// Provides efficient iteration over all neighbors of a given node using
-    /// unsafe pointer arithmetic for maximum performance.
+    /// Neighbours are yielded in ascending id order, which is what makes candidate-community
+    /// enumeration deterministic.
     #[inline]
-    pub fn neighbors(&self, node: usize) -> CSRNeighborIterator<E> {
-        debug_assert!(node < self.node_count());
-
+    pub fn neighbors(&self, node: usize) -> CSRNeighborIterator<'_> {
         let start = self.data.node_ptrs[node];
         let end = self.data.node_ptrs[node + 1];
-
         CSRNeighborIterator {
-            neighbor_ptr: unsafe { self.data.neighbors.as_ptr().add(start) },
-            weight_ptr: unsafe { self.data.weights.as_ptr().add(start) },
-            remaining: end - start,
+            neighbors: self.data.neighbors[start..end].iter(),
+            weights: self.data.weights[start..end].iter(),
         }
     }
 
@@ -160,438 +409,320 @@ where
     pub fn node_count(&self) -> usize {
         self.data.node_weights.len()
     }
-    /// Returns the number of edges in the network.
+
+    /// Returns the number of distinct undirected edges, self-loops included.
     #[inline]
     pub fn edge_count(&self) -> usize {
         self.data.edge_count
     }
-    /// Returns the degree (number of neighbors) of a node.
+
+    /// Returns the degree (number of distinct neighbours) of a node.
     #[inline]
     pub fn degree(&self, node: usize) -> usize {
-        self.data.degrees[node]
+        self.data.node_ptrs[node + 1] - self.data.node_ptrs[node]
     }
-    /// Returns the strength (sum of edge weights) of a node.
+
+    /// Returns the strength of a node: the sum of incident edge weights, with self-loops
+    /// counted twice.
     #[inline]
-    pub fn strength(&self, node: usize) -> E {
+    pub fn strength(&self, node: usize) -> f64 {
         self.data.strengths[node]
     }
-    /// Returns the weight of a node.
+
+    /// Returns the weight ("size") of a node.
     #[inline]
-    pub fn node_weight(&self, node: usize) -> N {
+    pub fn node_weight(&self, node: usize) -> f64 {
         self.data.node_weights[node]
     }
-    /// Returns the total weight of all edges in the network.
+
+    /// Returns the total weight of all edges, each undirected edge counted once.
     #[inline]
-    pub fn total_weight(&self) -> E {
+    pub fn total_weight(&self) -> f64 {
         self.data.total_weight
     }
 
-    /// Selects a random neighbor of a node with uniform probability.
-    ///
-    /// Returns `None` if the node has no neighbors.
-    pub fn random_neighbor(&self, node: usize, rng: &mut impl rand::Rng) -> Option<usize> {
-        let degree = self.degree(node);
-        if degree == 0 {
-            return None;
-        }
-
-        let random_idx = rng.random_range(0..degree);
-        let neighbor_idx = self.data.node_ptrs[node] + random_idx;
-        Some(self.data.neighbors[neighbor_idx])
+    /// Returns the sum of all node weights.
+    #[inline]
+    pub fn total_node_weight(&self) -> f64 {
+        self.data.node_weights.iter().sum()
     }
 
-    /// Returns the weight of an edge between two nodes.
-    ///
-    /// Uses binary search on the smaller degree node for efficient lookup.
-    /// Returns `None` if no edge exists between the nodes.
-    pub fn edge_weight(&self, from: usize, to: usize) -> Option<E> {
+    /// Returns the weight of a node's self-loop, or `0.0` if it has none.
+    #[inline]
+    pub fn self_loop_weight(&self, node: usize) -> f64 {
+        if !self.data.any_self_loops {
+            return 0.0;
+        }
+        let start = self.data.node_ptrs[node];
+        let end = self.data.node_ptrs[node + 1];
+        match self.data.neighbors[start..end].binary_search(&(node as u32)) {
+            Ok(pos) => self.data.weights[start + pos] as f64,
+            Err(_) => 0.0,
+        }
+    }
+
+    /// Returns the weight of the edge between two nodes, or `None` if there is none.
+    pub fn edge_weight(&self, from: usize, to: usize) -> Option<f64> {
+        // search the shorter row
         let (search_node, target) = if self.degree(from) <= self.degree(to) {
             (from, to)
         } else {
             (to, from)
         };
-
         let start = self.data.node_ptrs[search_node];
         let end = self.data.node_ptrs[search_node + 1];
-
-        match self.data.neighbors[start..end].binary_search(&target) {
-            Ok(pos) => Some(self.data.weights[start + pos]),
+        match self.data.neighbors[start..end].binary_search(&(target as u32)) {
+            Ok(pos) => Some(self.data.weights[start + pos] as f64),
             Err(_) => None,
         }
     }
 
-    /// Creates an aggregated network where nodes are grouped according to a grouping.
+    /// Returns copies of the underlying CSR arrays, as accepted by
+    /// [`from_csr_parts`](Self::from_csr_parts).
     ///
-    /// Combines nodes within the same group into super-nodes, summing weights
-    /// appropriately. Used in multilevel clustering algorithms.
+    /// Round-tripping through these is lossless.
+    pub fn to_csr_parts(&self) -> (Vec<usize>, Vec<u32>, Vec<f32>) {
+        (
+            self.data.node_ptrs.clone(),
+            self.data.neighbors.clone(),
+            self.data.weights.clone(),
+        )
+    }
+
+    /// The per-node weights, as accepted by [`from_csr_parts`](Self::from_csr_parts).
+    pub fn node_weights(&self) -> &[f64] {
+        &self.data.node_weights
+    }
+
+    /// Approximate resident size of the graph in bytes.
+    ///
+    /// Useful for sizing a machine before running: at 75M nodes and 750M edges this is
+    /// roughly 14 GB.
+    pub fn memory_bytes(&self) -> usize {
+        let d = &self.data;
+        d.node_ptrs.len() * size_of::<usize>()
+            + d.neighbors.len() * size_of::<u32>()
+            + d.weights.len() * size_of::<f32>()
+            + d.node_weights.len() * size_of::<f64>()
+            + d.strengths.len() * size_of::<f64>()
+    }
+
+    /// Collapses each group into a single super-node.
+    ///
+    /// Node weights are summed, a group's internal weight becomes a self-loop, and weight
+    /// between groups becomes an ordinary edge. `total_weight` and `Σ strength` are both
+    /// preserved exactly, so quality doesn't change — which is what lets the multilevel scheme
+    /// optimize one objective across levels.
     pub fn aggregate<G: NetworkGrouping>(&self, grouping: &G) -> Self {
-        let new_node_count = grouping.group_count();
-
-        let mut new_node_weights = vec![N::zero(); new_node_count];
-
-        for node in 0..self.node_count() {
-            let group = grouping.get_group(node);
-            new_node_weights[group] += self.data.node_weights[node];
-        }
-
-        let mut edge_memo = HashMap::new();
-        let mut self_loop_weights = HashMap::new();
-
-        for node in 0..self.node_count() {
-            let start = self.data.node_ptrs[node];
-            let end = self.data.node_ptrs[node + 1];
-
-            for i in start..end {
-                let neighbor = self.data.neighbors[i];
-                let weight = self.data.weights[i];
-
-                if node <= neighbor {
-                    let g1 = grouping.get_group(node);
-                    let g2 = grouping.get_group(neighbor);
-
-                    if g1 == g2 {
-                        *self_loop_weights.entry(g1).or_insert(E::zero()) += weight;
-                    } else {
-                        let (min_g, max_g) = if g1 < g2 { (g1, g2) } else { (g2, g1) };
-                        *edge_memo.entry((min_g, max_g)).or_insert(E::zero()) += weight;
-                    }
-                }
-            }
-        }
-
-        let mut edges = Vec::new();
-
-        for (&group, &weight) in self_loop_weights.iter() {
-            if weight > E::zero() {
-                edges.push((group, group, weight));
-            }
-        }
-
-        for (&(g1, g2), &weight) in edge_memo.iter() {
-            edges.push((g1, g2, weight));
-        }
-
-        Self::from_edges(&edges, new_node_weights)
-    }
-
-    /// Extracts a subgraph containing only nodes from a specific group.
-    ///
-    /// Creates a new network with only the nodes belonging to the specified group,
-    /// renumbering nodes consecutively starting from 0.
-    pub fn subgraph<G: NetworkGrouping>(&self, grouping: &G, group: usize) -> Self {
-        let group_members = &grouping.get_group_members()[group];
-        let subgraph_size = group_members.len();
-
-        let mut node_map = HashMap::with_capacity(subgraph_size);
-        let mut new_node_weights = Vec::with_capacity(subgraph_size);
-
-        for (new_id, &old_id) in group_members.iter().enumerate() {
-            node_map.insert(old_id, new_id);
-            new_node_weights.push(self.data.node_weights[old_id]);
-        }
-
-        let mut edges = Vec::new();
-        for &node in group_members {
-            let from_new = node_map[&node];
-
-            for (neighbor, weight) in self.neighbors(node) {
-                if let Some(&to_new) = node_map.get(&neighbor) {
-                    if from_new <= to_new {
-                        edges.push((from_new, to_new, weight));
-                    }
-                }
-            }
-        }
-        Self::from_edges(&edges, new_node_weights)
-    }
-
-    /// Converts the network back to a nalgebra CSR matrix format.
-    pub fn to_csr_matrix(&self) -> CsrMatrix<E> {
         let n = self.node_count();
-        let mut row_ptrs = vec![0; n + 1];
-        let mut col_indices = Vec::with_capacity(self.data.neighbors.len());
-        let mut values = Vec::with_capacity(self.data.weights.len());
+        let n_groups = grouping.group_count();
 
-        for node in 0..n {
-            for (neighbor, weight) in self.neighbors(node) {
-                col_indices.push(neighbor);
-                values.push(weight);
-            }
-            row_ptrs[node + 1] = col_indices.len();
+        let mut new_node_weights = vec![0.0f64; n_groups];
+        for v in 0..n {
+            new_node_weights[grouping.get_group(v)] += self.data.node_weights[v];
         }
 
-        CsrMatrix::try_from_csr_data(n, n, row_ptrs, col_indices, values).unwrap()
+        // counting sort into groups, so we can walk one group at a time
+        let mut starts = vec![0usize; n_groups + 1];
+        for v in 0..n {
+            starts[grouping.get_group(v) + 1] += 1;
+        }
+        for g in 0..n_groups {
+            starts[g + 1] += starts[g];
+        }
+        let mut members = vec![0u32; n];
+        let mut cursor = starts.clone();
+        for v in 0..n {
+            let g = grouping.get_group(v);
+            members[cursor[g]] = v as u32;
+            cursor[g] += 1;
+        }
+        drop(cursor);
+
+        // per group, accumulate to groups with id >= its own so each pair is seen once
+        let mut acc = vec![0.0f64; n_groups];
+        let mut touched: Vec<usize> = Vec::new();
+        let mut counts = vec![0usize; n_groups];
+        let mut pairs: Vec<(u32, u32, f32)> = Vec::new();
+
+        for g in 0..n_groups {
+            let mut self_loop_weight = 0.0f64;
+            for &v in &members[starts[g]..starts[g + 1]] {
+                for (u, w) in self.neighbors(v as usize) {
+                    if u == v as usize {
+                        self_loop_weight += w;
+                    }
+                    let h = grouping.get_group(u);
+                    if h < g {
+                        continue;
+                    }
+                    if acc[h] == 0.0 {
+                        touched.push(h);
+                    }
+                    acc[h] += w;
+                }
+            }
+
+            for &h in &touched {
+                let w = acc[h];
+                acc[h] = 0.0;
+                if w <= 0.0 {
+                    continue;
+                }
+                if h == g {
+                    // regular edges seen from both ends, loops once: acc = 2·regular + loops
+                    pairs.push((g as u32, g as u32, (0.5 * (w + self_loop_weight)) as f32));
+                    counts[g] += 1;
+                } else {
+                    pairs.push((g as u32, h as u32, w as f32));
+                    counts[g] += 1;
+                    counts[h] += 1;
+                }
+            }
+            touched.clear();
+        }
+
+        let mut node_ptrs = vec![0usize; n_groups + 1];
+        for g in 0..n_groups {
+            node_ptrs[g + 1] = node_ptrs[g] + counts[g];
+        }
+        let slots = node_ptrs[n_groups];
+        let mut neighbors = vec![0u32; slots];
+        let mut weights = vec![0.0f32; slots];
+        let mut cursor = node_ptrs.clone();
+        for &(a, b, w) in &pairs {
+            neighbors[cursor[a as usize]] = b;
+            weights[cursor[a as usize]] = w;
+            cursor[a as usize] += 1;
+            if a != b {
+                neighbors[cursor[b as usize]] = a;
+                weights[cursor[b as usize]] = w;
+                cursor[b as usize] += 1;
+            }
+        }
+        drop(cursor);
+
+        // can't fail: group ids, already-validated weights
+        Self::finish(node_ptrs, neighbors, weights, new_node_weights, false)
+            .expect("aggregate produces a structurally valid graph")
     }
 
-    /// Checks if the network contains any self-loops.
-    pub fn has_self_loops(&self) -> bool {
-        for node in 0..self.node_count() {
-            for (neighbor, _) in self.neighbors(node) {
-                if neighbor == node {
-                    return true;
+    /// Converts the network back to a symmetric sparse matrix.
+    pub fn to_csr_matrix(&self) -> CsrMatrix<f64> {
+        let n = self.node_count();
+        let row_ptrs = self.data.node_ptrs.clone();
+        let col_indices: Vec<usize> = self.data.neighbors.iter().map(|&u| u as usize).collect();
+        let values: Vec<f64> = self.data.weights.iter().map(|&w| w as f64).collect();
+        CsrMatrix::try_from_csr_data(n, n, row_ptrs, col_indices, values)
+            .expect("CSR invariants are maintained by construction")
+    }
+
+    /// Verifies that the adjacency is exactly symmetric.
+    ///
+    /// Constructors already enforce `Σ strength == 2 · total_weight`, which catches the
+    /// realistic mistakes (a k-NN graph nobody symmetrised). This is the exhaustive version:
+    /// for every stored `(v, u, w)`, check `(u, v, w)` is there too.
+    ///
+    /// O(m log d) — worth running once when wiring up a new input source, not every call.
+    pub fn validate_symmetry(&self) -> Result<()> {
+        for v in 0..self.node_count() {
+            for (u, w) in self.neighbors(v) {
+                match self.edge_weight(u, v) {
+                    Some(back) if (back - w).abs() <= 1e-6 * w.abs().max(1.0) => {}
+                    Some(back) => {
+                        return Err(ClusteringError::InvalidCsr(format!(
+                            "edge ({v}, {u}) has weight {w} but ({u}, {v}) has {back}"
+                        )));
+                    }
+                    None => {
+                        return Err(ClusteringError::InvalidCsr(format!(
+                            "edge ({v}, {u}) is present but ({u}, {v}) is missing"
+                        )));
+                    }
                 }
             }
         }
-        false
+        Ok(())
     }
 
-    /// Calculates the density of the network (ratio of actual to possible edges).
+    /// Returns `true` if any node carries a self-loop.
+    #[inline]
+    pub fn has_self_loops(&self) -> bool {
+        self.data.any_self_loops
+    }
+
+    /// Returns the fraction of possible edges that are present.
     pub fn density(&self) -> f64 {
         let n = self.node_count() as f64;
-        let m = self.data.edge_count as f64;
         let max_edges = n * (n - 1.0) / 2.0;
-
-        if max_edges > 0.0 { m / max_edges } else { 0.0 }
-    }
-
-    /// Calculates the total weight of edges from a node to a specific community.
-    ///
-    /// Uses optimized unsafe pointer arithmetic for maximum performance in
-    /// clustering algorithms.
-    #[inline]
-    pub fn weight_to_comm(
-        &self,
-        node: usize,
-        community: usize,
-        grouping: &impl NetworkGrouping,
-    ) -> E {
-        let start = self.data.node_ptrs[node];
-        let end = self.data.node_ptrs[node + 1];
-
-        if start == end {
-            return E::zero();
-        }
-
-        let mut weight = E::zero();
-
-        // Direct unsafe pointer access for maximum performance
-        unsafe {
-            let mut neighbor_ptr = self.data.neighbors.as_ptr().add(start);
-            let mut weight_ptr = self.data.weights.as_ptr().add(start);
-            let mut remaining = end - start;
-
-            while remaining > 0 {
-                let neighbor = *neighbor_ptr;
-                if grouping.get_group(neighbor) == community {
-                    weight += *weight_ptr;
-                }
-                neighbor_ptr = neighbor_ptr.add(1);
-                weight_ptr = weight_ptr.add(1);
-                remaining -= 1;
-            }
-        }
-
-        weight
-    }
-
-    #[inline]
-    pub fn weight_to_two_comms(
-        &self,
-        node: usize,
-        comm1: usize,
-        comm2: usize,
-        grouping: &impl NetworkGrouping,
-    ) -> (E, E) {
-        let start = self.data.node_ptrs[node];
-        let end = self.data.node_ptrs[node + 1];
-
-        if start == end {
-            return (E::zero(), E::zero());
-        }
-
-        let mut w1 = E::zero();
-        let mut w2 = E::zero();
-
-        unsafe {
-            let mut neighbor_ptr = self.data.neighbors.as_ptr().add(start);
-            let mut weight_ptr = self.data.weights.as_ptr().add(start);
-            let mut remaining = end - start;
-
-            while remaining > 0 {
-                let neighbor = *neighbor_ptr;
-                let neighbor_comm = grouping.get_group(neighbor);
-                let weight = *weight_ptr;
-
-                if neighbor_comm == comm1 {
-                    w1 += weight;
-                } else if neighbor_comm == comm2 {
-                    w2 += weight;
-                }
-
-                neighbor_ptr = neighbor_ptr.add(1);
-                weight_ptr = weight_ptr.add(1);
-                remaining -= 1;
-            }
-        }
-
-        (w1, w2)
-    }
-
-    pub fn weight_to_comms_batch(
-        &self,
-        node: usize,
-        communities: &[usize],
-        grouping: &impl NetworkGrouping,
-    ) -> Vec<E> {
-        let mut weights = vec![E::zero(); communities.len()];
-
-        // Create lookup map for community index
-        let community_to_idx: HashMap<usize, usize> = communities
-            .iter()
-            .enumerate()
-            .map(|(i, &c)| (c, i))
-            .collect();
-
-        let start = self.data.node_ptrs[node];
-        let end = self.data.node_ptrs[node + 1];
-
-        unsafe {
-            let mut neighbor_ptr = self.data.neighbors.as_ptr().add(start);
-            let mut weight_ptr = self.data.weights.as_ptr().add(start);
-            let mut remaining = end - start;
-
-            while remaining > 0 {
-                let neighbor = *neighbor_ptr;
-                let neighbor_comm = grouping.get_group(neighbor);
-
-                if let Some(&idx) = community_to_idx.get(&neighbor_comm) {
-                    weights[idx] += *weight_ptr;
-                }
-
-                neighbor_ptr = neighbor_ptr.add(1);
-                weight_ptr = weight_ptr.add(1);
-                remaining -= 1;
-            }
-        }
-
-        weights
-    }
-
-    #[inline]
-    pub fn self_loop_weight(&self, node: usize) -> E {
-        let start = self.data.node_ptrs[node];
-        let end = self.data.node_ptrs[node + 1];
-
-        if start >= end {
-            return E::zero();
-        }
-
-        // Check if first neighbor is self (common optimization)
-        if self.data.neighbors[start] == node {
-            return self.data.weights[start];
-        }
-
-        // Binary search since neighbors are sorted
-        match self.data.neighbors[start..end].binary_search(&node) {
-            Ok(pos) => self.data.weights[start + pos],
-            Err(_) => E::zero(),
-        }
-    }
-
-    pub fn community_internal_weight(
-        &self,
-        community: usize,
-        grouping: &impl NetworkGrouping,
-    ) -> E {
-        let members = &grouping.get_group_members()[community];
-        let mut total_weight = E::zero();
-
-        // Use parallel processing for large communities
-        if members.len() > 100 {
-            total_weight = members
-                .par_iter()
-                .map(|&node| {
-                    let mut internal_weight = E::zero();
-                    for (neighbor, weight) in self.neighbors(node) {
-                        if grouping.get_group(neighbor) == community {
-                            if node == neighbor {
-                                internal_weight += weight; // Self-loop: full weight
-                            } else if node < neighbor {
-                                internal_weight += weight; // Edge: count once
-                            }
-                        }
-                    }
-                    internal_weight
-                })
-                .sum();
+        if max_edges > 0.0 {
+            self.data.edge_count as f64 / max_edges
         } else {
-            for &node in members {
-                for (neighbor, weight) in self.neighbors(node) {
-                    if grouping.get_group(neighbor) == community {
-                        if node == neighbor {
-                            total_weight += weight;
-                        } else if node < neighbor {
-                            total_weight += weight;
-                        }
-                    }
-                }
-            }
-        }
-
-        total_weight
-    }
-
-    pub fn community_total_strength(&self, community: usize, grouping: &impl NetworkGrouping) -> E {
-        let members = &grouping.get_group_members()[community];
-
-        if members.len() > 50 {
-            // Parallel for large communities
-            members.par_iter().map(|&node| self.strength(node)).sum()
-        } else {
-            members
-                .iter()
-                .map(|&node| self.strength(node))
-                .fold(E::zero(), |acc, x| acc + x)
+            0.0
         }
     }
 }
 
-/// High-performance iterator over neighbors and edge weights.
+fn validate_node_weights(node_weights: &[f64]) -> Result<()> {
+    for (node, &nw) in node_weights.iter().enumerate() {
+        if !nw.is_finite() || nw < 0.0 {
+            return Err(ClusteringError::InvalidNodeWeight { node, weight: nw });
+        }
+    }
+    Ok(())
+}
+
+#[inline]
+fn check_edge(from: usize, to: usize, w: f64, n_nodes: usize) -> Result<()> {
+    if from >= n_nodes {
+        return Err(ClusteringError::NodeIndexOutOfRange {
+            node: from,
+            n_nodes,
+        });
+    }
+    if to >= n_nodes {
+        return Err(ClusteringError::NodeIndexOutOfRange { node: to, n_nodes });
+    }
+    if !w.is_finite() {
+        return Err(ClusteringError::NonFiniteWeight { edge: (from, to) });
+    }
+    if w < 0.0 {
+        return Err(ClusteringError::NegativeWeight {
+            edge: (from, to),
+            weight: w,
+        });
+    }
+    Ok(())
+}
+
+/// Checks `Σ strength == 2 · total_weight`.
 ///
-/// Uses unsafe pointer arithmetic to provide zero-cost iteration over
-/// the neighbors of a node in the CSR representation.
-pub struct CSRNeighborIterator<E> {
-    neighbor_ptr: *const usize,
-    weight_ptr: *const E,
-    remaining: usize,
+/// This is the invariant the self-loop convention exists to maintain, and it is the cheapest
+/// guard against the failure mode that motivated the 0.7 rewrite: a null model silently
+/// switched off, producing plausible-looking but wrong clusters.
+///
+/// Checked in **release builds too**, not just debug. It costs one O(n) pass against minutes
+/// of clustering, and it is the only thing standing between an asymmetric input to
+/// [`CSRNetwork::from_csr_parts`] and quietly corrupt results. It is a necessary condition for
+/// symmetry, not a sufficient one — [`CSRNetwork::validate_symmetry`] is the exhaustive check.
+///
+/// The tolerance is loose (`1e-6` relative) because both sides are naive f64 sums over
+/// possibly hundreds of millions of terms, accumulated in different orders. Any real asymmetry
+/// is off by whole edge weights, many orders of magnitude above that.
+fn check_degree_sum(data: &CSRNetworkData) -> Result<()> {
+    let sum: f64 = data.strengths.iter().sum();
+    let expected = 2.0 * data.total_weight;
+    let tol = 1e-6 * expected.abs().max(1.0);
+    if (sum - expected).abs() > tol {
+        return Err(ClusteringError::AsymmetricGraph {
+            degree_sum: sum,
+            expected,
+        });
+    }
+    Ok(())
 }
 
-impl<E: Copy> Iterator for CSRNeighborIterator<E> {
-    type Item = (usize, E);
-
-    #[inline]
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.remaining == 0 {
-            return None;
-        }
-
-        unsafe {
-            let neighbor = *self.neighbor_ptr;
-            let weight = *self.weight_ptr;
-
-            self.neighbor_ptr = self.neighbor_ptr.add(1);
-            self.weight_ptr = self.weight_ptr.add(1);
-            self.remaining -= 1;
-            Some((neighbor, weight))
-        }
-    }
-
-    #[inline]
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        (self.remaining, Some(self.remaining))
-    }
-}
-
-impl<E> ExactSizeIterator for CSRNeighborIterator<E> where E: Copy {}
-
-unsafe impl<E: Send> Send for CSRNeighborIterator<E> {}
-unsafe impl<E: Sync> Sync for CSRNeighborIterator<E> {}
-
-impl<N, E> std::fmt::Display for CSRNetwork<N, E>
-where
-    N: FloatOpsTS + std::fmt::Display + 'static,
-    E: FloatOpsTS + std::fmt::Display + 'static,
-{
+impl std::fmt::Display for CSRNetwork {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -601,5 +732,265 @@ where
             self.total_weight(),
             self.density()
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::network::grouping::{NetworkGrouping, VectorGrouping};
+
+    fn triangle_with_loop() -> CSRNetwork {
+        // triangle 0-1-2 (unit weights) plus a self-loop of weight 3 on node 0
+        CSRNetwork::from_edges(3, &[(0, 1, 1.0), (1, 2, 1.0), (0, 2, 1.0), (0, 0, 3.0)]).unwrap()
+    }
+
+    #[test]
+    fn self_loop_counts_twice_toward_strength_once_toward_total() {
+        let g = triangle_with_loop();
+        assert_eq!(g.strength(0), 8.0, "2*3 self-loop + 1 + 1");
+        assert_eq!(g.strength(1), 2.0);
+        assert_eq!(g.strength(2), 2.0);
+        assert_eq!(g.total_weight(), 6.0, "1 + 1 + 1 + 3");
+        assert_eq!(g.self_loop_weight(0), 3.0);
+        assert_eq!(g.self_loop_weight(1), 0.0);
+    }
+
+    #[test]
+    fn degree_sum_invariant_holds() {
+        for g in [
+            triangle_with_loop(),
+            CSRNetwork::from_edges(4, &[(0, 1, 2.5), (2, 3, 0.5)]).unwrap(),
+            CSRNetwork::from_edges(3, &[] as &[(usize, usize, f64)]).unwrap(),
+        ] {
+            let sum: f64 = (0..g.node_count()).map(|v| g.strength(v)).sum();
+            assert!((sum - 2.0 * g.total_weight()).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn parallel_edges_are_merged() {
+        let g = CSRNetwork::from_edges(2, &[(0, 1, 1.0), (0, 1, 2.0)]).unwrap();
+        assert_eq!(g.degree(0), 1);
+        assert_eq!(g.edge_weight(0, 1), Some(3.0));
+        assert_eq!(g.total_weight(), 3.0);
+        assert_eq!(g.edge_count(), 1);
+    }
+
+    #[test]
+    fn aggregate_preserves_total_weight_and_degree_sum() {
+        // three 6-cliques joined by two bridges
+        let mut edges = Vec::new();
+        for b in 0..3usize {
+            for i in 0..6 {
+                for j in (i + 1)..6 {
+                    edges.push((b * 6 + i, b * 6 + j, 1.0));
+                }
+            }
+        }
+        edges.push((0, 6, 1.0));
+        edges.push((6, 12, 1.0));
+
+        let g = CSRNetwork::from_edges(18, &edges).unwrap();
+        let memb: Vec<usize> = (0..18).map(|i| i / 6).collect();
+        let agg = g.aggregate(&VectorGrouping::from_assignments(&memb));
+
+        let fine: f64 = (0..18).map(|v| g.strength(v)).sum();
+        let coarse: f64 = (0..agg.node_count()).map(|v| agg.strength(v)).sum();
+        assert_eq!(agg.node_count(), 3);
+        assert!(
+            (fine - coarse).abs() < 1e-12,
+            "Σ strength {fine} vs {coarse}"
+        );
+        assert!((g.total_weight() - agg.total_weight()).abs() < 1e-12);
+
+        // each super-node's strength equals the sum of its members' strengths
+        for c in 0..3 {
+            let members: f64 = (0..18)
+                .filter(|&v| memb[v] == c)
+                .map(|v| g.strength(v))
+                .sum();
+            assert!((members - agg.strength(c)).abs() < 1e-12, "community {c}");
+        }
+        // and node weights are summed
+        assert_eq!(agg.node_weight(0), 6.0);
+    }
+
+    #[test]
+    fn aggregate_is_idempotent_on_singletons() {
+        let g = triangle_with_loop();
+        let identity = VectorGrouping::from_assignments(&[0, 1, 2]);
+        let agg = g.aggregate(&identity);
+        for v in 0..3 {
+            assert!((g.strength(v) - agg.strength(v)).abs() < 1e-12);
+        }
+        assert!((g.total_weight() - agg.total_weight()).abs() < 1e-12);
+        assert_eq!(agg.self_loop_weight(0), 3.0);
+    }
+
+    #[test]
+    fn rejects_invalid_input() {
+        use crate::error::ClusteringError;
+        assert_eq!(
+            CSRNetwork::from_edges(2, &[(0, 5, 1.0)]).unwrap_err(),
+            ClusteringError::NodeIndexOutOfRange {
+                node: 5,
+                n_nodes: 2
+            }
+        );
+        assert_eq!(
+            CSRNetwork::from_edges(2, &[(0, 1, -1.0)]).unwrap_err(),
+            ClusteringError::NegativeWeight {
+                edge: (0, 1),
+                weight: -1.0
+            }
+        );
+        assert!(matches!(
+            CSRNetwork::from_edges(2, &[(0, 1, f64::NAN)]).unwrap_err(),
+            ClusteringError::NonFiniteWeight { .. }
+        ));
+    }
+
+    /// The zero-copy path must produce exactly the same graph as the edge-list path.
+    #[test]
+    fn from_csr_parts_matches_from_edges() {
+        let edges = [
+            (0usize, 1usize, 1.5f64),
+            (1, 2, 2.0),
+            (0, 2, 0.5),
+            (0, 0, 3.0),
+            (3, 3, 1.0),
+        ];
+        let via_edges = CSRNetwork::from_edges(4, &edges).unwrap();
+
+        // the same graph, expressed as full symmetric CSR
+        let node_ptrs = vec![0usize, 3, 5, 7, 8];
+        let neighbors = vec![0u32, 1, 2, 0, 2, 0, 1, 3];
+        let weights = vec![3.0f32, 1.5, 0.5, 1.5, 2.0, 0.5, 2.0, 1.0];
+        let via_csr = CSRNetwork::from_csr_parts(node_ptrs, neighbors, weights, None).unwrap();
+
+        assert_eq!(via_edges.node_count(), via_csr.node_count());
+        assert_eq!(via_edges.edge_count(), via_csr.edge_count());
+        assert!((via_edges.total_weight() - via_csr.total_weight()).abs() < 1e-9);
+        for v in 0..4 {
+            assert!(
+                (via_edges.strength(v) - via_csr.strength(v)).abs() < 1e-9,
+                "strength({v})"
+            );
+            let a: Vec<_> = via_edges.neighbors(v).collect();
+            let b: Vec<_> = via_csr.neighbors(v).collect();
+            assert_eq!(a, b, "neighbors({v})");
+        }
+    }
+
+    #[test]
+    fn from_csr_parts_sorts_and_merges_rows() {
+        // row 0 lists its neighbours out of order and twice
+        let node_ptrs = vec![0usize, 3, 4];
+        let neighbors = vec![1u32, 1, 0, 0];
+        let weights = vec![1.0f32, 2.0, 0.0, 3.0];
+        let g = CSRNetwork::from_csr_parts(node_ptrs, neighbors, weights, None).unwrap();
+        assert_eq!(g.edge_weight(0, 1), Some(3.0), "duplicates summed");
+        assert_eq!(g.degree(0), 1, "the zero-weight self-loop is dropped");
+    }
+
+    #[test]
+    fn from_csr_parts_rejects_malformed_input() {
+        use crate::error::ClusteringError;
+        // node_ptrs not matching the entry count
+        assert!(matches!(
+            CSRNetwork::from_csr_parts(vec![0, 5], vec![0u32], vec![1.0f32], None).unwrap_err(),
+            ClusteringError::InvalidCsr(_)
+        ));
+        // mismatched parallel arrays
+        assert!(matches!(
+            CSRNetwork::from_csr_parts(vec![0, 1], vec![0u32], vec![1.0f32, 2.0], None)
+                .unwrap_err(),
+            ClusteringError::InvalidCsr(_)
+        ));
+        // out-of-range column index
+        assert!(matches!(
+            CSRNetwork::from_csr_parts(vec![0, 1], vec![9u32], vec![1.0f32], None).unwrap_err(),
+            ClusteringError::NodeIndexOutOfRange { .. }
+        ));
+        // non-decreasing violation
+        assert!(matches!(
+            CSRNetwork::from_csr_parts(vec![0, 2, 1], vec![0u32, 1], vec![1.0f32, 1.0], None)
+                .unwrap_err(),
+            ClusteringError::InvalidCsr(_)
+        ));
+    }
+
+    /// The realistic catastrophic mistake: handing over a k-NN graph that was never
+    /// symmetrised. Node 0 lists node 1, but node 1 does not list node 0.
+    #[test]
+    fn asymmetric_input_is_rejected() {
+        use crate::error::ClusteringError;
+        let node_ptrs = vec![0usize, 1, 1];
+        let neighbors = vec![1u32];
+        let weights = vec![1.0f32];
+        let err = CSRNetwork::from_csr_parts(node_ptrs, neighbors, weights, None).unwrap_err();
+        assert!(
+            matches!(err, ClusteringError::AsymmetricGraph { .. }),
+            "expected AsymmetricGraph, got {err}"
+        );
+        assert!(err.to_string().contains("symmetrised"));
+    }
+
+    #[test]
+    fn asymmetric_weights_are_rejected() {
+        use crate::error::ClusteringError;
+        // both directions present, but with different weights
+        let node_ptrs = vec![0usize, 1, 2];
+        let neighbors = vec![1u32, 0];
+        let weights = vec![1.0f32, 5.0];
+        let err = CSRNetwork::from_csr_parts(node_ptrs, neighbors, weights, None).unwrap_err();
+        assert!(
+            matches!(err, ClusteringError::AsymmetricGraph { .. }),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn validate_symmetry_accepts_well_formed_graphs() {
+        for g in [
+            triangle_with_loop(),
+            CSRNetwork::from_edges(6, &[(0, 1, 2.5), (2, 3, 0.5), (4, 4, 1.0)]).unwrap(),
+            CSRNetwork::from_edges(3, &[] as &[(usize, usize, f64)]).unwrap(),
+        ] {
+            g.validate_symmetry().unwrap();
+        }
+    }
+
+    /// A "balanced" asymmetry that the degree-sum check cannot see: two errors that cancel in
+    /// the totals. This is what `validate_symmetry` is for.
+    #[test]
+    fn validate_symmetry_catches_what_the_degree_sum_cannot() {
+        // strengths and total both balance, but neither edge agrees with its reverse
+        let node_ptrs = vec![0usize, 2, 3, 4];
+        let neighbors = vec![1u32, 2, 0, 0];
+        let weights = vec![1.0f32, 3.0, 3.0, 1.0];
+        let g = CSRNetwork::from_csr_parts(node_ptrs, neighbors, weights, None)
+            .expect("degree sum balances, so construction succeeds");
+        assert!(
+            g.validate_symmetry().is_err(),
+            "validate_symmetry should catch mismatched reverse weights"
+        );
+    }
+
+    #[test]
+    fn memory_is_eight_bytes_per_stored_entry() {
+        let mut edges = Vec::new();
+        for i in 0..1000usize {
+            for d in 1..=5 {
+                if i + d < 1000 {
+                    edges.push((i, i + d, 1.0));
+                }
+            }
+        }
+        let g = CSRNetwork::from_edges(1000, &edges).unwrap();
+        let entries = 2 * g.edge_count(); // both directions stored
+        let node_side = 1000 * (8 + 8) + 1001 * 8;
+        assert_eq!(g.memory_bytes(), entries * 8 + node_side);
     }
 }
