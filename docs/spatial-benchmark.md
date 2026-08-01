@@ -22,25 +22,67 @@ Take the lower number as the bar. Method papers grade their own homework.
 
 ## Where everyone else lands
 
-Independent, all 12 sections, computed from the BenchmarkST repo's per-section ARI files
-(Hu et al., Genome Biology 2024;25(1):212):
+Independent, all 12 sections, mean across slices of each slice's 20-run mean. Computed from
+the BenchmarkST repo's raw per-run ARI files (Hu et al., Genome Biology 2024;25(1):212).
 
-| Method | median | mean |
+| Method | mean over 12 slices | source |
 |---|---|---|
-| GraphST | 0.559 | 0.557 |
-| STAGATE | 0.523 | 0.505 |
-| ADEPT | 0.519 | 0.531 |
-| **BANKSY** | **~0.46** | — |
-| CCST | 0.434 | 0.459 |
-| SEDR | 0.426 | 0.414 |
-| ConGI | 0.419 | 0.419 |
-| SpaGCN | 0.412 | 0.392 |
-| conST | 0.394 | 0.395 |
-| DeepST | 0.262 | 0.300 |
+| GraphST | 0.557 | raw data |
+| ADEPT | 0.530 | raw data |
+| STAGATE | 0.503 | raw data |
+| BASS | ~0.49 | figure |
+| SpatialPCA | ~0.48 | figure |
+| **BANKSY** | **0.469** | figure, ±0.01 |
+| CCST | 0.451 | raw data |
+| PRECAST | ~0.46 | figure |
+| ConGI | 0.422 | raw data |
+| SEDR | 0.411 | raw data |
+| SpaGCN | 0.392 | raw data |
+| conST | 0.385 | raw data |
+| BayesSpace | ~0.37 | figure |
+| DeepST | 0.322 | raw data |
+| DR.SC | ~0.33 | figure |
+
+Nine methods have machine-readable per-run results in `ari_results/*.txt`; the rest exist
+only inside the Fig. 2a raster and were recovered by colourmap inversion cross-checked
+against the bioRxiv preprint's vector figures. **BANKSY is one of the figure-derived ones**
+— it is new in the published version, so there is no vector cross-check. Treat 0.469 as
+±0.01, not an exact published value.
+
+This benchmark contains **no non-spatial baseline** — no Seurat, Leiden, Louvain or k-means
+anywhere in it. It cannot answer the question that matters most to us.
 
 GraphST is the ceiling set by heavy deep-learning methods. It is **not** our bar — a
 feature-augmentation approach that then runs ordinary Leiden should be measured against
 BANKSY, which is the same shape.
+
+## Self-reported vs independent
+
+Which published numbers survive someone else running them. Self-reported values are the
+stored outputs in each tool's own tutorial notebooks.
+
+| Method | section | self-reported | independent | gap |
+|---|---|---|---|---|
+| GraphST | 151673 | 0.635 | 0.633 (Kang), 0.638 (Hu) | **~0.00** |
+| BayesSpace | 151673 | 0.55 | 0.550 (Kang) | **0.00** |
+| STAGATE | 151676 | 0.60 | 0.493 (Hu) | **0.11** |
+| BANKSY | 12-slice | 0.518 | 0.469 (Hu) | **0.05** |
+
+GraphST and BayesSpace reproduce essentially exactly. STAGATE and BANKSY do not. That is the
+single most useful fact here: a published number is not evidence unless someone independent
+has reproduced it, and two of the four checked did not survive.
+
+BayesSpace also disagrees *between* independent benchmarks — 0.550 (Kang) vs ~0.40 (Hu) on
+the same section — so "independent" is not automatically decisive either.
+
+Two protocol details found in the tools' own tutorials, both of which change results:
+
+* **GraphST's own tutorial hardcodes `n_clusters = 7` for every section.** Run as-published
+  on 151669–151672, it asks for 7 clusters against 5-layer truth. The 5/7 split exists only
+  in third-party benchmark repos.
+* **GraphST filters unannotated spots *after* clustering and spatial refinement**, so those
+  spots still train the model and still vote in the refinement step. Hu's benchmark drops
+  them before the graph is built. Same nominal rule, different graph.
 
 ## The bar that justifies existing
 
@@ -63,11 +105,23 @@ qualifying resolutions** — not the best. Reporting best-of-sweep makes the num
 incomparable with every published figure. Fallback when nothing matches: widen to k±1; if
 still nothing, report nothing.
 
-**Exclude unannotated spots.** 28 of 3639 on 151673. Small effect (~0.004) but it shifts
-everything.
+**Exclude unannotated spots — before clustering, not just before scoring.** 28 of 3639 on
+151673. The benchmark drops them in `load_DLPFC` (`ad.obs.dropna()`) so they never enter the
+graph at all. Dropping them only at scoring time gives a different graph and a different
+answer.
 
-**5 vs 7 clusters.** Most sections have 7 layers; some have 5 (L3, L4, L5, L6, WM). Reported
-as the 151669–151672 group — *unverified*, check each section's annotation set directly.
+**5 vs 7 clusters — verified from code, and not stated in the paper.** Hard-coded
+byte-identically across every run script in the benchmark:
+
+```python
+[[7,'151507'],[7,'151508'],[7,'151509'],[7,'151510'],
+ [5,'151669'],[5,'151670'],[5,'151671'],[5,'151672'],
+ [7,'151673'],[7,'151674'],[7,'151675'],[7,'151676']]
+```
+
+So **sample 2 (151669–151672) is 5 clusters**, annotated L3–L6 + WM only — no L1 or L2. The
+other eight sections are 7. Getting this wrong makes every affected section incomparable,
+and no paper states it.
 
 **ARI implementation** is not a source of difference: `sklearn.adjusted_rand_score` and
 `mclust::adjustedRandIndex` agree, and an independent from-scratch implementation reproduced
@@ -80,10 +134,12 @@ deposited script calls `SmoothLabels(k = 6)` before scoring — visible only in 
 our raw labels against 0.518 would understate us. Either replicate the smoothing or state
 plainly that the comparison is unsmoothed-to-smoothed.
 
-**Configuration can swamp method differences.** DeepST scores 0.538 in one independent
-benchmark and 0.229 in another, on the same section — a swing of 0.31, far larger than the
-gaps between most methods. GraphST, by contrast, reproduces to three decimals across groups.
-Budget for this before concluding anything from a single number.
+**Configuration can swamp method differences.** On section 151673, across two independent
+benchmarks: DeepST scores 0.538 and 0.229 — a swing of 0.31, far larger than the gaps
+between most methods on the list. BayesSpace scores 0.550 and ~0.40. GraphST, by contrast,
+reproduces to three decimals (0.633 vs 0.638). So a method's number says as much about who
+ran it as about the method, unless it is one of the reproducible ones. Budget for that before
+concluding anything from a single figure — including ours.
 
 ## Matching BANKSY, if we replicate it
 
