@@ -77,14 +77,12 @@ where
 
     for i in 0..n_samples {
         let mut point = [T::zero(); K];
-        for j in 0..K {
-            point[j] = *data.get([i, j]).unwrap_or(&T::zero());
+        for (j, slot) in point.iter_mut().enumerate() {
+            *slot = *data.get([i, j]).unwrap_or(&T::zero());
         }
         kdtree.add(&point, i as u64);
     }
     println!("KD-tree construction: {:?}", kdtree_start.elapsed());
-
-    let knn_search_start = Instant::now();
 
     let knn_search_start = Instant::now();
     let (knn_indices, knn_distances_sq) =
@@ -245,7 +243,7 @@ where
     // Use fewer threads to reduce memory bandwidth contention
     // Rule of thumb: Use ~1 thread per memory channel (typically 2-8 for modern CPUs)
     let memory_threads = std::cmp::min(64, rayon::current_num_threads());
-    let chunk_size = (n_samples + memory_threads - 1) / memory_threads;
+    let chunk_size = n_samples.div_ceil(memory_threads);
 
     println!(
         "Using {} threads with chunk size {} to reduce memory contention",
@@ -269,8 +267,8 @@ where
                     for &i in chunk {
                         // Build query
                         let mut query = [T::zero(); K];
-                        for j in 0..K {
-                            query[j] = *data.get([i, j]).unwrap_or(&T::zero());
+                        for (j, slot) in query.iter_mut().enumerate() {
+                            *slot = *data.get([i, j]).unwrap_or(&T::zero());
                         }
 
                         // Search
