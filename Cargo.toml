@@ -15,6 +15,8 @@ default = ["knn"]
 # clustering core can be built and tested without the HNSW/kd-tree stack, which does not
 # compile on every target.
 knn = ["dep:hnsw_rs", "dep:kiddo", "dep:ndarray"]
+# Spatial neighbour graphs are always available: the uniform-grid index they use has no
+# dependencies, so there is no build to opt out of.
 
 [dependencies]
 anyhow = "1.0.100"
