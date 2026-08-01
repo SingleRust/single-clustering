@@ -20,6 +20,13 @@
 //! elsewhere; the relative-neighbourhood graph drops 52%. Removing an artefact edge needs a
 //! rule about length. See [`HullPruning`].
 //!
+//! They may still be worth adding as an option one day — MST ⊆ RNG ⊆ GG ⊆ Delaunay, both are
+//! always connected, and Lingas (1994) extracts either from an existing triangulation in
+//! O(n), so they are nearly free once the Delaunay exists. Two things to get right if so:
+//! use the **open** exclusion region, since the closed variant disconnects on ties and
+//! gridded coordinates are made of ties; and expect mean degree ~4 for Gabriel and ~2.56 for
+//! RNG against Delaunay's 6.
+//!
 //! # What other tools do
 //!
 //! Worth knowing, because the defaults differ sharply:
@@ -69,10 +76,17 @@ pub enum HullPruning {
     /// edges on uniform-random points, and less on real tissue, whose cells pack more
     /// regularly than a Poisson process.
     ///
-    /// What it will *not* do is clear a hole only two or three cells across. Removing those
-    /// needs a factor around 1.5, which drops ~16% of genuine edges everywhere. That is a
-    /// resolution limit rather than a tuning failure: at two cells wide it is genuinely
-    /// arguable whether the cells either side are neighbours.
+    /// It also happens to be the canonical value. Zahn's 1971 inconsistent-edge criterion is
+    /// this same shape — an edge "significantly larger than the average of nearby edge
+    /// weights on **both sides** of the edge" — and he reports that "a factor of 2 usually
+    /// means the separation is quite apparent", with worked examples spanning 1.3 to 2.6.
+    ///
+    /// Two things it will not do. It cannot clear a hole only two or three cells across:
+    /// that needs a factor near 1.5, which drops ~16% of genuine edges everywhere, and at
+    /// that width it is arguable whether the cells either side are neighbours at all. And,
+    /// as Zahn notes of the same criterion, it "doesn't detect one-way gradients however
+    /// steep" — a tissue whose density ramps smoothly across the section has no local
+    /// discontinuity for the rule to find.
     Adaptive {
         /// Multiple of the local scale above which an edge is dropped.
         factor: f64,
