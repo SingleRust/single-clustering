@@ -23,6 +23,7 @@
 //!
 //! Neither affects `array_row` / `array_col`, which is what [`lattice_graph`] wants.
 
+pub mod banksy;
 pub mod delaunay;
 pub(crate) mod grid;
 pub mod lattice;
