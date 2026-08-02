@@ -24,11 +24,13 @@
 //! Neither affects `array_row` / `array_col`, which is what [`lattice_graph`] wants.
 
 pub mod banksy;
+pub mod combine;
 pub mod delaunay;
 pub(crate) mod grid;
 pub mod lattice;
 pub mod points;
 
+pub use combine::{Normalization, fuse, per_sample};
 pub use delaunay::{HullPruning, delaunay_graph};
 pub use lattice::{Lattice, lattice_graph, visium_isometric_coords};
 pub use points::{SpatialWeight, Symmetry, knn_graph, radius_graph};
