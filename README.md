@@ -77,10 +77,10 @@ biology rather than about matching another implementation — **ours scores ARI 
 Timings are against `scanpy`/`igraph`, which is a C implementation called from Python, not
 interpreted code — so these are not interpreter-overhead numbers.
 
-| workload | this crate | `scanpy` / `igraph` |
-|---|---|---|
-| PBMC3k, per resolution | 7–11 ms | 22–24 ms |
-| synthetic k-NN graphs | — | **1.33× slower** (geometric mean) |
+| workload | this crate | `scanpy` / `igraph` | speedup |
+|---|---|---|---|
+| PBMC3k, per resolution | 7–11 ms | 22–24 ms | 2–3× |
+| synthetic k-NN graphs, geometric mean | — | — | 1.33× |
 
 Single-threaded scaling on synthetic k-NN graphs:
 
