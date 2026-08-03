@@ -54,6 +54,44 @@ pub enum ClusteringError {
     },
     /// The supplied CSR arrays were not a well-formed sparse matrix.
     InvalidCsr(String),
+    /// Two observations claimed the same lattice position.
+    DuplicateLatticePosition {
+        /// Lattice row.
+        row: u32,
+        /// Lattice column.
+        col: u32,
+        /// The two node indices sharing it.
+        nodes: (usize, usize),
+    },
+    /// Visium hex positions did not all share the same `(row + col)` parity.
+    ///
+    /// In doubled coordinates every spot has the same parity, so mixed parity means the
+    /// coordinates are not doubled — most often offset coordinates (`col / 2`), which would
+    /// silently produce a wrong graph rather than an empty one.
+    InconsistentHexParity {
+        /// A node with the majority parity.
+        expected_node: usize,
+        /// The first node found disagreeing with it.
+        node: usize,
+        /// The offending position.
+        position: (u32, u32),
+    },
+    /// No triangulation exists for the given points — they are collinear, or fewer than
+    /// three distinct positions.
+    ///
+    /// Reported rather than returning an edgeless graph, which would cluster into singletons
+    /// and look like a result.
+    DegenerateTriangulation {
+        /// How many points were supplied.
+        n_points: usize,
+    },
+    /// Parallel coordinate arrays had different lengths.
+    CoordinateLengthMismatch {
+        /// Length of the first array.
+        got: usize,
+        /// Expected length, from the first array supplied.
+        expected: usize,
+    },
     /// The adjacency is not symmetric, so `Σ strength != 2 · total_weight`.
     ///
     /// Most often means an un-symmetrised k-NN graph was passed to
@@ -100,6 +138,30 @@ impl fmt::Display for ClusteringError {
                 crate::network::MAX_NODES
             ),
             Self::InvalidCsr(msg) => write!(f, "malformed CSR input: {msg}"),
+            Self::DuplicateLatticePosition { row, col, nodes } => write!(
+                f,
+                "nodes {} and {} both sit at lattice position ({row}, {col})",
+                nodes.0, nodes.1
+            ),
+            Self::DegenerateTriangulation { n_points } => write!(
+                f,
+                "no Delaunay triangulation exists for these {n_points} points: they are \
+                 collinear, or fewer than three distinct positions"
+            ),
+            Self::CoordinateLengthMismatch { got, expected } => {
+                write!(f, "coordinate array has length {got}, expected {expected}")
+            }
+            Self::InconsistentHexParity {
+                expected_node,
+                node,
+                position,
+            } => write!(
+                f,
+                "node {node} at ({}, {}) disagrees in (row + col) parity with node \
+                 {expected_node}. Visium doubled coordinates give every spot the same parity; \
+                 mixed parity usually means offset coordinates were passed instead",
+                position.0, position.1
+            ),
             Self::AsymmetricGraph {
                 degree_sum,
                 expected,

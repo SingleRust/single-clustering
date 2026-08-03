@@ -5,6 +5,7 @@ pub mod error;
 #[cfg(feature = "knn")]
 pub mod neighborhood;
 pub mod network;
+pub mod spatial;
 #[cfg(test)]
 pub(crate) mod testdata;
 

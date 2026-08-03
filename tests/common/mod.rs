@@ -129,6 +129,36 @@ pub fn test_graphs() -> Vec<(String, CSRNetwork)> {
     out
 }
 
+/// Adjusted Rand Index: agreement between two labellings, corrected for chance.
+///
+/// 1.0 is exact agreement, 0.0 is what random labelling scores. Unlike NMI it does not
+/// reward splitting, so a partition that shatters one of the two is penalised.
+pub fn adjusted_rand_index(a: &[usize], b: &[usize]) -> f64 {
+    let n = a.len() as f64;
+    if a.len() < 2 {
+        return 1.0;
+    }
+    let ka = a.iter().max().map_or(0, |m| m + 1);
+    let kb = b.iter().max().map_or(0, |m| m + 1);
+    let mut joint = std::collections::HashMap::new();
+    let (mut sa, mut sb) = (vec![0.0f64; ka], vec![0.0f64; kb]);
+    for i in 0..a.len() {
+        *joint.entry((a[i], b[i])).or_insert(0.0f64) += 1.0;
+        sa[a[i]] += 1.0;
+        sb[b[i]] += 1.0;
+    }
+    let comb2 = |x: f64| x * (x - 1.0) / 2.0;
+    let sum_ij: f64 = joint.values().map(|&c| comb2(c)).sum();
+    let sum_a: f64 = sa.iter().map(|&c| comb2(c)).sum();
+    let sum_b: f64 = sb.iter().map(|&c| comb2(c)).sum();
+    let expected = sum_a * sum_b / comb2(n);
+    let max = 0.5 * (sum_a + sum_b);
+    if (max - expected).abs() < 1e-12 {
+        return 1.0;
+    }
+    (sum_ij - expected) / (max - expected)
+}
+
 /// Normalized mutual information between two labellings, in `[0, 1]`.
 pub fn nmi(a: &[usize], b: &[usize]) -> f64 {
     let n = a.len() as f64;

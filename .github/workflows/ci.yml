@@ -36,6 +36,18 @@ jobs:
       - name: Test (release)
         run: cargo test --no-default-features --release
 
+  # the #[ignore]d tests: scale runs and the exhaustive optimality sweep. ~11s total, and
+  # without this the HD-scale path and the Bell(12) optimality check never execute anywhere.
+  scale:
+    name: Scale and exhaustive
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Ignored tests
+        run: cargo test --no-default-features --release -- --ignored --nocapture
+
   # separate so an hnsw breakage doesn't take the core red
   knn:
     name: With kNN feature
