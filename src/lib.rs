@@ -6,8 +6,9 @@ pub mod error;
 pub mod neighborhood;
 pub mod network;
 pub mod spatial;
-#[cfg(test)]
-pub(crate) mod testdata;
+#[cfg(any(test, feature = "testdata"))]
+#[doc(hidden)]
+pub mod testdata;
 
 pub mod community_search;
 

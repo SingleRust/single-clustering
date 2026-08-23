@@ -71,60 +71,44 @@ pub fn refine(
     }
 
     let total_weight = graph.total_weight();
-    let mut labels = vec![0u32; n];
+
+    // Each community writes only its own members' labels, so the slices are disjoint. Refine
+    // one at a time and merge, which keeps that obvious whether or not it runs in parallel.
+    let refine_one = |m: &Vec<u32>| {
+        let mut sorted = m.clone();
+        sorted.sort_unstable();
+        let mut out = vec![0u32; sorted.len()];
+        refine_into(
+            graph,
+            m,
+            &sorted,
+            objective,
+            total_weight,
+            &draws,
+            max_community_weight,
+            randomness,
+            &mut out,
+        );
+        (sorted, out)
+    };
+    let nonempty = members.iter().filter(|m| !m.is_empty());
 
     #[cfg(feature = "parallel")]
-    {
+    let refined: Vec<(Vec<u32>, Vec<u32>)> = {
         use rayon::prelude::*;
-        // Each community writes only its own members' labels, so the output slices are
-        // disjoint. Collected per community and merged, which keeps that obvious.
-        let refined: Vec<(Vec<u32>, Vec<u32>)> = members
-            .par_iter()
-            .filter(|m| !m.is_empty())
-            .map(|m| {
-                let mut sorted = m.clone();
-                sorted.sort_unstable();
-                let mut out = vec![0u32; sorted.len()];
-                refine_into(
-                    graph,
-                    m,
-                    &sorted,
-                    objective,
-                    total_weight,
-                    &draws,
-                    max_community_weight,
-                    randomness,
-                    &mut out,
-                );
-                (sorted, out)
-            })
-            .collect();
-        for (sorted, out) in refined {
-            for (i, &g) in sorted.iter().enumerate() {
-                labels[g as usize] = out[i];
-            }
-        }
-    }
+        nonempty
+            .collect::<Vec<_>>()
+            .into_par_iter()
+            .map(refine_one)
+            .collect()
+    };
     #[cfg(not(feature = "parallel"))]
-    {
-        for m in members.iter().filter(|m| !m.is_empty()) {
-            let mut sorted = m.clone();
-            sorted.sort_unstable();
-            let mut out = vec![0u32; sorted.len()];
-            refine_into(
-                graph,
-                m,
-                &sorted,
-                objective,
-                total_weight,
-                &draws,
-                max_community_weight,
-                randomness,
-                &mut out,
-            );
-            for (i, &g) in sorted.iter().enumerate() {
-                labels[g as usize] = out[i];
-            }
+    let refined: Vec<(Vec<u32>, Vec<u32>)> = nonempty.map(refine_one).collect();
+
+    let mut labels = vec![0u32; n];
+    for (sorted, out) in refined {
+        for (&g, &label) in sorted.iter().zip(out.iter()) {
+            labels[g as usize] = label;
         }
     }
 

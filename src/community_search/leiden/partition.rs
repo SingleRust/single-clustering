@@ -13,7 +13,7 @@ use rand::seq::SliceRandom;
 use rand_chacha::ChaCha8Rng;
 
 use crate::network::CSRNetwork;
-use crate::network::grouping::{NetworkGrouping, VectorGrouping};
+use crate::network::grouping::VectorGrouping;
 
 /// Membership value for a node that has been removed from its community.
 ///
@@ -52,7 +52,7 @@ impl Partition {
     /// Creates a partition where every node is alone in its own community.
     pub fn singleton(graph: &CSRNetwork) -> Self {
         let n = graph.node_count();
-        let mut p = Self {
+        Self {
             membership: (0..n as u32).collect(),
             size: vec![1; n],
             weight: (0..n).map(|v| graph.node_weight(v)).collect(),
@@ -62,10 +62,7 @@ impl Partition {
             free: Vec::new(),
             total_weight: graph.total_weight(),
             total_node_weight: graph.total_node_weight(),
-        };
-        // no nodes, no communities
-        p.free.clear();
-        p
+        }
     }
 
     /// Creates a partition from an explicit membership vector.
@@ -433,34 +430,6 @@ impl NeighborWeights {
             let c = membership[u];
             if c == UNASSIGNED {
                 continue; // neighbour is mid-move; treated as belonging to nothing
-            }
-            self.add(c as usize, w);
-        }
-        &self.touched
-    }
-
-    /// Like [`collect`](Self::collect), but only counts neighbours that share the node's
-    /// group in `constraint`.
-    ///
-    /// What keeps refinement inside the communities local moving found — a node can only
-    /// merge with refined communities inside its own working community.
-    pub fn collect_constrained(
-        &mut self,
-        graph: &CSRNetwork,
-        membership: &[u32],
-        node: usize,
-        constraint: &[u32],
-    ) -> &[usize] {
-        self.begin();
-        let own = constraint[node];
-
-        for (u, w) in graph.neighbors(node) {
-            if u == node || constraint[u] != own {
-                continue;
-            }
-            let c = membership[u];
-            if c == UNASSIGNED {
-                continue;
             }
             self.add(c as usize, w);
         }

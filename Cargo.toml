@@ -18,13 +18,14 @@ knn = ["dep:hnsw_rs", "dep:kiddo", "dep:ndarray"]
 # Multi-threaded refinement. Off by default until local moving is parallel too, since
 # refinement alone is worth about 1.25x.
 parallel = []
+# Shared test fixtures, so unit tests and integration tests use one copy. Not public API.
+testdata = []
 # Spatial neighbour graphs are always available: the uniform-grid index they use has no
 # dependencies, so there is no build to opt out of.
 
 [dependencies]
 anyhow = "1.0.100"
 nalgebra-sparse = "0.10.0"
-num-traits = "0.2.19"
 rayon = "1.10.0"
 single-utilities = "0.8.6"
 rand = "0.9.0"
@@ -32,13 +33,21 @@ rand_chacha = { version = "0.9.0" }
 
 kiddo = { version = "5.2.2", optional = true }
 ndarray = { version = "0.16.1", features = ["rayon"], optional = true }
-hnsw_rs = { version = "0.3.2", features = ["simdeez_f"], optional = true }
 delaunator = "1.1.0"
 
 [dev-dependencies]
+single-clustering = { path = ".", default-features = false, features = ["testdata"] }
 serde_json = "1.0"
 criterion = { version = "0.5", features = ["html_reports"] }
 
 [[bench]]
 name = "leiden"
 harness = false
+
+# simdeez_f is x86-only: anndists imports simdeez::{avx2,sse2} unguarded, so it cannot
+# compile on aarch64. Keep the SIMD where it works, drop it where it doesn't.
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+hnsw_rs = { version = "0.3.2", features = ["simdeez_f"], optional = true }
+
+[target.'cfg(not(target_arch = "x86_64"))'.dependencies]
+hnsw_rs = { version = "0.3.2", optional = true }

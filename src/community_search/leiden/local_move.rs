@@ -9,8 +9,6 @@
 use rand_chacha::ChaCha8Rng;
 
 use crate::community_search::leiden::objective::{InsertContext, Objective};
-#[allow(unused_imports)]
-use crate::community_search::leiden::partition::NeighborWeights;
 use crate::community_search::leiden::partition::{MoveScratch, Partition};
 use crate::network::CSRNetwork;
 
@@ -77,8 +75,7 @@ pub fn local_move(
             None => true,
         };
 
-        for i in 0..scratch.weights.touched().len() {
-            let c = scratch.weights.touched()[i];
+        for &c in scratch.weights.touched() {
             if c == old || !fits(partition, c) {
                 continue;
             }

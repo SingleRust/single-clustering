@@ -30,7 +30,7 @@ use nalgebra_sparse::CsrMatrix;
 use single_utilities::traits::FloatOpsTS;
 
 use crate::error::{ClusteringError, Result};
-use crate::network::grouping::NetworkGrouping;
+use crate::network::grouping::VectorGrouping;
 
 /// Largest addressable node id. `u32` adjacency caps the graph at ~4.29 billion nodes.
 pub const MAX_NODES: usize = u32::MAX as usize;
@@ -513,7 +513,7 @@ impl CSRNetwork {
     /// between groups becomes an ordinary edge. `total_weight` and `Σ strength` are both
     /// preserved exactly, so quality doesn't change — which is what lets the multilevel scheme
     /// optimize one objective across levels.
-    pub fn aggregate<G: NetworkGrouping>(&self, grouping: &G) -> Self {
+    pub fn aggregate(&self, grouping: &VectorGrouping) -> Self {
         let n = self.node_count();
         let n_groups = grouping.group_count();
 
@@ -738,7 +738,7 @@ impl std::fmt::Display for CSRNetwork {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::network::grouping::{NetworkGrouping, VectorGrouping};
+    use crate::network::grouping::VectorGrouping;
 
     fn triangle_with_loop() -> CSRNetwork {
         // triangle 0-1-2 (unit weights) plus a self-loop of weight 3 on node 0

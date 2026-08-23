@@ -1257,11 +1257,11 @@ dependencies = [
  "kiddo",
  "nalgebra-sparse",
  "ndarray",
- "num-traits",
  "rand",
  "rand_chacha",
  "rayon",
  "serde_json",
+ "single-clustering",
  "single-utilities",
 ]
 
