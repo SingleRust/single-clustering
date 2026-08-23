@@ -1,9 +1,7 @@
 //! The result type shared by every clustering algorithm in this crate.
 
-/// Label assigned to points that an algorithm considers noise.
-///
-/// Leiden never produces it — every node lands somewhere — but density-based methods will, so
-/// it's here from the start rather than as a breaking change later.
+/// Label for points an algorithm considers noise. Leiden never produces it; density-based
+/// methods will.
 pub const NOISE: usize = usize::MAX;
 
 /// An assignment of items to clusters.

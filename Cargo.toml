@@ -11,17 +11,14 @@ description = "A high-performance network clustering library implementing commun
 
 [features]
 default = ["knn"]
-# k-nearest-neighbour graph construction from high-dimensional data. Split out so the
-# clustering core can be built and tested without the HNSW/kd-tree stack, which does not
-# compile on every target.
+# kNN graph construction. Split out so the clustering core builds without the HNSW/kd-tree
+# stack. Spatial graphs need no feature - the uniform-grid index has no dependencies.
 knn = ["dep:hnsw_rs", "dep:kiddo", "dep:ndarray"]
-# Multi-threaded refinement. Off by default until local moving is parallel too, since
-# refinement alone is worth about 1.25x.
+# Multi-threaded refinement. Off until local moving is parallel too, since refinement alone is
+# worth about 1.25x.
 parallel = []
-# Shared test fixtures, so unit tests and integration tests use one copy. Not public API.
+# Shared test fixtures, so unit and integration tests use one copy. Not public API.
 testdata = []
-# Spatial neighbour graphs are always available: the uniform-grid index they use has no
-# dependencies, so there is no build to opt out of.
 
 [dependencies]
 anyhow = "1.0.100"

@@ -4,20 +4,10 @@
 //! cargo run --release --no-default-features --example reorder -- 1000000
 //! ```
 //!
-//! The inner loop is a scatter-gather over CSR: every visited node reads `membership` and the
-//! community aggregates at its neighbours' indices. If those indices are scattered, each is a
-//! cache miss. Relabelling nodes so that neighbours sit near each other in memory changes no
-//! arithmetic at all — the clustering must come out identical up to the permutation — so any
-//! difference in wall time is pure locality.
-//!
-//! Two orderings are compared against whatever order the data arrived in:
-//!
-//! * **Morton (Z-order)** on coordinates — needs positions, so spatial data only, but nearly
-//!   free to compute.
-//! * **BFS** over the graph — works for any graph, including expression k-NN where there are
-//!   no coordinates.
-//!
-//! # What it measured
+//! The inner loop is a scatter-gather over CSR, so scattered neighbour indices are cache
+//! misses. Relabelling so neighbours sit near each other changes no arithmetic — the
+//! clustering must come out identical up to the permutation — so the wall-time difference is
+//! pure locality. Morton needs coordinates, BFS works on any graph.
 //!
 //! ```text
 //!    n     morton   bfs    edge span (orig -> morton)
@@ -25,14 +15,9 @@
 //!    1M     1.13x  1.09x   27778 -> 701
 //! ```
 //!
-//! Locality improves by a factor of ~40 and buys 13%. The gain grows with size — at 200k the
-//! membership array is under a megabyte and still fits in L3, so there is nothing to fix —
-//! but slowly, and extrapolates to only ~1.2x at 8M.
-//!
-//! So reordering is real but small, and it was ranked below parallelism on the strength of
-//! these numbers rather than on a guess: parallel refinement alone is worth ~1.4x for
-//! comparable effort. Kept here because the conclusion is scale-dependent and someone should
-//! re-measure before believing it at 75M.
+//! ~40x better locality buys 13%, and extrapolates to only ~1.2x at 8M. Real but small, which
+//! is why parallelism was ranked above it. Scale-dependent, so re-measure before believing
+//! this at 75M.
 
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;

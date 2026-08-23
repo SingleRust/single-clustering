@@ -1,28 +1,14 @@
 //! Stability and validity of the spatial neighbour graphs.
 //!
-//! The unit tests prove each builder produces the graph it claims to. That is necessary but
-//! not sufficient: what matters on real data is whether what you get out survives what real
-//! data does to you — cells missed by segmentation, coordinates off by a fraction of a cell,
-//! a parameter chosen slightly differently.
+//! The unit tests prove each builder makes the graph it claims to. These check the result
+//! survives what real data does to you: missed cells, jittered coordinates, a parameter
+//! chosen slightly differently.
 //!
-//! # What a bare spatial graph can and cannot do
-//!
-//! It carries no expression, so the only structure it encodes is spatial: which cells are
-//! near which. Two consequences, and both are asserted here.
-//!
-//! It reliably recovers **physical separation** — detached fragments, tissue masked apart,
-//! anything with a real gap. That shows up as connected components, needs no resolution
-//! choice, and is stable under every perturbation tried below.
-//!
-//! It does **not** find boundaries inside continuous tissue. There is nothing for the
-//! objective to anchor to, so it returns a tiling whose blob size is set by the resolution.
-//! The tiling is spatially contiguous and looks exactly like a result, but it is arbitrary,
-//! and therefore unstable: resample and the boundaries move. That is asserted too, so the
-//! limitation cannot quietly stop being true.
-//!
-//! So the resolution-free question — "which cells could possibly be in the same domain" — is
-//! the one a spatial graph answers. Choosing among the domains inside a connected region
-//! needs expression, which arrives with neighbourhood feature averaging.
+//! A bare spatial graph carries no expression, so it recovers **physical separation** —
+//! detached fragments, masked tissue, anything with a real gap — as connected components, with
+//! no resolution to choose. It does **not** find boundaries inside continuous tissue: there's
+//! nothing to anchor to, so you get an arbitrary tiling that looks like a result and moves
+//! when you resample. Both are asserted here.
 
 mod common;
 
@@ -55,7 +41,7 @@ fn separated_tissue(seed: u64) -> (Vec<[f64; 2]>, Vec<usize>) {
     (pts, truth)
 }
 
-/// Featureless tissue at one density — nothing for a spatial objective to find.
+/// Featureless tissue at one density, so nothing to find.
 fn homogeneous_tissue(seed: u64) -> Vec<[f64; 2]> {
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
     (0..2500)
@@ -63,7 +49,7 @@ fn homogeneous_tissue(seed: u64) -> Vec<[f64; 2]> {
         .collect()
 }
 
-/// Connected component of each node — the resolution-free structure a spatial graph encodes.
+/// Connected component per node — the resolution-free structure a spatial graph encodes.
 fn components(graph: &CSRNetwork) -> Vec<usize> {
     let n = graph.node_count();
     let mut label = vec![usize::MAX; n];
@@ -105,8 +91,7 @@ fn build(name: &str, pts: &[[f64; 2]]) -> CSRNetwork {
     }
 }
 
-/// Validity: separated tissue must come back as separate components — exactly, and with no
-/// resolution to choose.
+/// Separated tissue comes back as separate components, with no resolution to choose.
 #[test]
 fn every_builder_separates_disconnected_tissue() {
     let (pts, truth) = separated_tissue(1);
@@ -119,8 +104,7 @@ fn every_builder_separates_disconnected_tissue() {
     }
 }
 
-/// Validity: a domain may subdivide an island, but must never span two. That holds at every
-/// resolution, which is what makes it the meaningful guarantee.
+/// A domain may subdivide an island but must never span two, at any resolution.
 #[test]
 fn no_domain_ever_spans_separated_tissue() {
     let (pts, truth) = separated_tissue(7);
@@ -140,7 +124,7 @@ fn no_domain_ever_spans_separated_tissue() {
     }
 }
 
-/// Stability: segmentation misses cells, so dropping some must not change the structure.
+/// Segmentation misses cells, so dropping some must not change the structure.
 #[test]
 fn structure_survives_subsampling() {
     let (pts, _) = separated_tissue(2);
@@ -165,8 +149,7 @@ fn structure_survives_subsampling() {
     }
 }
 
-/// Stability: segmentation centroids are not exact, so jitter below cell spacing must not
-/// move anything.
+/// Centroids aren't exact, so jitter below cell spacing must not move anything.
 #[test]
 fn structure_survives_coordinate_jitter() {
     let (pts, _) = separated_tissue(3);
@@ -192,7 +175,7 @@ fn structure_survives_coordinate_jitter() {
     }
 }
 
-/// The builders define "neighbour" differently, but must agree about real structure.
+/// The builders define "neighbour" differently but must agree about real structure.
 #[test]
 fn builders_agree_on_real_structure() {
     let (pts, _) = separated_tissue(5);
@@ -214,8 +197,7 @@ fn builders_agree_on_real_structure() {
     }
 }
 
-/// Stability: neighbouring parameter values must give the same structure. A cliff would mean
-/// the parameter is load-bearing in a way users cannot reason about.
+/// Neighbouring parameter values must give the same structure — no cliffs.
 #[test]
 fn parameters_do_not_change_the_structure() {
     let (pts, truth) = separated_tissue(4);
@@ -251,11 +233,8 @@ fn parameters_do_not_change_the_structure() {
     }
 }
 
-/// The documented limitation, asserted so it cannot quietly stop being true.
-///
-/// On uniform tissue there is nothing spatial to find, so the result is an arbitrary tiling:
-/// contiguous, plausible-looking, and not reproducible under resampling. Anyone clustering a
-/// bare spatial graph on continuous tissue is reading tea leaves, and this is the evidence.
+/// The documented limitation, asserted so it can't quietly stop being true: on uniform tissue
+/// the result is an arbitrary tiling that doesn't survive resampling.
 #[test]
 fn homogeneous_tissue_gives_an_arbitrary_unstable_tiling() {
     let pts = homogeneous_tissue(4);
@@ -293,7 +272,7 @@ fn homogeneous_tissue_gives_an_arbitrary_unstable_tiling() {
     );
 }
 
-/// Whatever the builder or resolution, a domain must be one connected region of tissue.
+/// A domain must be one connected region, whatever the builder or resolution.
 #[test]
 fn domains_are_always_spatially_contiguous() {
     let (pts, _) = separated_tissue(6);
@@ -310,7 +289,7 @@ fn domains_are_always_spatially_contiguous() {
     }
 }
 
-/// The lattice path: tissue detection masking a band must split the capture area.
+/// Masking a band must split the capture area.
 #[test]
 fn lattice_masking_splits_the_capture_area_cleanly() {
     let (mut rows, mut cols, mut truth) = (Vec::new(), Vec::new(), Vec::new());

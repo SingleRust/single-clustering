@@ -4,12 +4,9 @@
 //! cargo run --release --no-default-features --example scaling_ceiling -- 500000
 //! ```
 //!
-//! Runs N *independent* clusterings concurrently, each on its own graph, and measures
-//! aggregate throughput against one thread. Nothing is shared, so there is no contention and
-//! no coordination — the only thing that can stop this scaling linearly is the memory system.
-//!
-//! That makes it a ceiling: a real parallel local-move, which does share state, cannot beat
-//! it. If throughput flattens at 4x on 8 cores, no amount of clever lock-free work gets 8x.
+//! Runs N *independent* clusterings concurrently and measures aggregate throughput against
+//! one thread. Nothing is shared, so only the memory system can stop it scaling linearly —
+//! which makes it a ceiling. A real parallel local-move shares state and can't beat it.
 
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;

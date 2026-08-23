@@ -1,13 +1,11 @@
 //! Results must not depend on how the work was divided.
 //!
-//! The single most important test for the parallel path. A staleness bug — a thread reading a
-//! community aggregate another thread has already changed — does not crash or produce an
-//! obviously wrong answer. It produces a *slightly different* clustering, which looks entirely
-//! plausible. Comparing across thread counts is what makes that visible.
+//! The one test the parallel path really needs. A staleness bug doesn't crash — it returns a
+//! slightly different, entirely plausible clustering, and comparing across thread counts is
+//! what makes that visible.
 //!
-//! Runs the same inputs under 1, 2, 4, 8 and 16 rayon threads and demands byte-identical
-//! labels. Requires the `parallel` feature to be meaningful, but is written to pass either
-//! way so a default build still exercises the comparison logic.
+//! Same inputs under 1, 2, 4, 8 and 16 rayon threads, demanding byte-identical labels. Only
+//! meaningful with the `parallel` feature, but passes either way.
 
 mod common;
 

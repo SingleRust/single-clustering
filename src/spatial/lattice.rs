@@ -1,25 +1,16 @@
 //! Neighbour graphs for observations on a regular lattice.
 //!
-//! Visium spots and Visium HD bins sit on a known grid, so their neighbours follow from
-//! integer arithmetic — no spatial index, no distance computation, nothing approximate.
-//! At HD scale (millions of bins) that is the difference between seconds and minutes.
+//! Visium spots and HD bins sit on a known grid, so neighbours are integer arithmetic — no
+//! spatial index, nothing approximate. At HD scale that's seconds instead of minutes.
 //!
-//! # Why not distance-based
-//!
-//! `squidpy.gr.spatial_neighbors` ignores the lattice and runs Euclidean kNN on the float
-//! pixel coordinates, keeping edges under `median(dist) * 1.3`. On contiguous tissue that
-//! reproduces the lattice exactly, but the cutoff is global, so on a sparse or fragmented
-//! lattice it bridges the gaps: at 50% occupancy roughly half the edges it produces are not
-//! lattice-adjacent, and at 20% it is three quarters. Working from the integers is exact
-//! everywhere and needs no heuristic.
-//!
-//! # The anisotropy trap
+//! `squidpy.gr.spatial_neighbors` instead runs Euclidean kNN on pixel coordinates with a
+//! global cutoff, which bridges gaps on a sparse lattice: at 50% occupancy about half its
+//! edges aren't lattice-adjacent, at 20% three quarters.
 //!
 //! Never run Euclidean kNN on raw doubled coordinates. In-row neighbours are 2 units apart
-//! while diagonal ones are only √2, so a metric method silently drops the two in-row
-//! neighbours and returns a diagonal-only graph — wrong, and wrong in a way that still looks
-//! like a plausible clustering. [`visium_isometric_coords`] rescales to a space where all six
-//! neighbours are equidistant; use it for anything distance-based.
+//! and diagonal ones only √2, so a metric method drops the in-row pair and hands back a
+//! diagonal-only graph that still clusters plausibly. [`visium_isometric_coords`] rescales so
+//! all six are equidistant.
 
 use crate::error::{ClusteringError, Result};
 use crate::network::{CSRNetwork, MAX_NODES};
@@ -38,8 +29,7 @@ pub enum Lattice {
 }
 
 impl Lattice {
-    /// Half the neighbour offsets — enough that each undirected edge is generated exactly
-    /// once, by its lower endpoint in (row, col) order. The other half are these negated.
+    /// Half the offsets, so each undirected edge is emitted once by its lower endpoint.
     const fn forward_offsets(self) -> &'static [(i64, i64)] {
         match self {
             Self::VisiumHex => &[(0, 2), (1, -1), (1, 1)],
@@ -48,7 +38,7 @@ impl Lattice {
         }
     }
 
-    /// Neighbours an interior position has. Only used for documentation and tests.
+    /// Neighbours an interior position has. Docs and tests only.
     pub const fn degree(self) -> usize {
         match self {
             Self::VisiumHex => 6,
@@ -77,12 +67,11 @@ impl RowIndex {
 
 /// Builds a neighbour graph from integer lattice coordinates.
 ///
-/// `rows` and `cols` give each observation's position; every edge has weight 1.0. Positions
-/// that are absent — tissue-masked spots, trimmed bins — simply have no edge there, so a
-/// partial capture area needs no special handling.
+/// Every edge has weight 1.0. Absent positions — masked spots, trimmed bins — just have no
+/// edge, so a partial capture area needs no special handling.
 ///
-/// Since the graph is exactly the lattice adjacency, Leiden's internal-connectivity guarantee
-/// becomes spatial contiguity: no community can be split across disconnected regions.
+/// The graph is exactly the lattice adjacency, so Leiden's internal-connectivity guarantee
+/// becomes spatial contiguity.
 ///
 /// # Errors
 ///
@@ -103,14 +92,12 @@ pub fn lattice_graph(rows: &[u32], cols: &[u32], lattice: Lattice) -> Result<CSR
         return CSRNetwork::from_csr_parts(vec![0], Vec::new(), Vec::new(), None);
     }
 
-    // Sorted by (row, col), so a row is contiguous and its columns ascend — which is what
-    // lets a neighbour lookup be a binary search inside one row rather than over everything.
+    // sorted by (row, col), so a lookup is a binary search inside one row
     let mut order: Vec<u32> = (0..n as u32).collect();
     order.sort_unstable_by_key(|&v| key(rows[v as usize], cols[v as usize]));
 
-    // Columns in sorted order, held separately so the binary search reads contiguous memory.
-    // Going through `cols[order[i]]` gathers randomly on every comparison instead: 1.21s vs
-    // 954ms on 10.5M bins.
+    // held separately so the search reads contiguous memory. `cols[order[i]]` gathers
+    // randomly instead: 1.21s vs 954ms on 10.5M bins.
     let sorted_cols: Vec<u32> = order.iter().map(|&v| cols[v as usize]).collect();
 
     for (i, w) in order.windows(2).enumerate() {
@@ -131,8 +118,8 @@ pub fn lattice_graph(rows: &[u32], cols: &[u32], lattice: Lattice) -> Result<CSR
     let index = build_row_index(&order, rows);
     let offsets = lattice.forward_offsets();
 
-    // Two passes so the CSR arrays are allocated once at their final size. Materialising an
-    // edge list first would cost ~700 MB at HD scale before the graph even exists.
+    // two passes so the CSR arrays are allocated once. An edge list first would cost
+    // ~700 MB at HD scale.
     let mut degree = vec![0u32; n];
     visit_edges(&order, rows, cols, &sorted_cols, &index, offsets, |v, u| {
         degree[v] += 1;
@@ -161,18 +148,16 @@ pub fn lattice_graph(rows: &[u32], cols: &[u32], lattice: Lattice) -> Result<CSR
     CSRNetwork::from_csr_parts(node_ptrs, neighbors, weights, None)
 }
 
-/// Packs a position into one sortable integer. `i64` keeps the arithmetic honest for offsets
-/// that would take a `u32` below zero.
+/// Packs a position into one sortable integer. `i64` so negative offsets don't wrap.
 #[inline]
 const fn key(row: u32, col: u32) -> u64 {
     ((row as u64) << 32) | col as u64
 }
 
-/// Rejects coordinates that are not doubled.
+/// Rejects coordinates that aren't doubled.
 ///
-/// Real Visium data is always `(row + col)` even, but only *consistency* is required here —
-/// a shifted origin is fine, offset coordinates are not. Without this, passing `col / 2`
-/// produces a graph that is wrong rather than empty, since the offsets still find something.
+/// Only consistency is required, so a shifted origin is fine. Without this, passing `col / 2`
+/// gives a wrong graph rather than an empty one — the offsets still find something.
 fn check_hex_parity(rows: &[u32], cols: &[u32]) -> Result<()> {
     let parity = (rows[0] + cols[0]) % 2;
     for v in 1..rows.len() {
@@ -189,10 +174,9 @@ fn check_hex_parity(rows: &[u32], cols: &[u32]) -> Result<()> {
 
 /// Rescales Visium doubled coordinates so all six neighbours sit at the same distance.
 ///
-/// Doubled coordinates are anisotropic — in-row neighbours are 2 units apart, diagonal ones
-/// √2 — so any distance-based method must be given these instead. `pitch` is the
-/// centre-to-centre spot spacing, 100.0 µm on standard Visium; the output is in the same
-/// units, and every one of the six neighbours lands exactly `pitch` away.
+/// Hand these to anything distance-based. `pitch` is centre-to-centre spot spacing, 100.0 µm
+/// on standard Visium; output is in the same units and every neighbour lands exactly `pitch`
+/// away.
 ///
 /// # Errors
 ///
@@ -208,7 +192,7 @@ pub fn visium_isometric_coords(
             expected: rows.len(),
         });
     }
-    // col carries the doubling, so it scales by pitch/2; row spacing is the hex height.
+    // col carries the doubling, so pitch/2; row spacing is the hex height
     let (sx, sy) = (pitch / 2.0, pitch * f64::sqrt(3.0) / 2.0);
     Ok((
         cols.iter().map(|&c| c as f64 * sx).collect(),
@@ -232,8 +216,8 @@ fn build_row_index(order: &[u32], rows: &[u32]) -> RowIndex {
     index
 }
 
-/// Calls `f(v, u)` once per undirected edge, with both node indices in the caller's
-/// numbering. Runs identically in both passes, so degrees and fill can never disagree.
+/// Calls `f(v, u)` once per undirected edge, in the caller's numbering. Identical in both
+/// passes, so degrees and fill can't disagree.
 #[inline]
 fn visit_edges(
     order: &[u32],
@@ -269,7 +253,7 @@ fn lookup(
     col: u32,
 ) -> Option<usize> {
     let range = index.range(row)?;
-    // The row is short — 128 columns on Visium, ~3250 on HD — so this stays in L1.
+    // rows are short (128 on Visium, ~3250 on HD), so this stays in L1
     let i = sorted_cols[range.clone()].binary_search(&col).ok()?;
     Some(order[range.start + i] as usize)
 }
@@ -309,7 +293,7 @@ mod tests {
         (rows, cols)
     }
 
-    /// Undirected edges as coordinate pairs, so results can be compared across node orderings.
+    /// Edges as coordinate pairs, so orderings can be compared.
     fn edge_set(g: &CSRNetwork, rows: &[u32], cols: &[u32]) -> HashSet<((u32, u32), (u32, u32))> {
         let mut out = HashSet::new();
         for v in 0..g.node_count() {
@@ -320,7 +304,7 @@ mod tests {
         out
     }
 
-    /// Orders an edge's endpoints so the two directions collapse to one entry.
+    /// Orders endpoints so both directions collapse to one entry.
     fn canon(a: (u32, u32), b: (u32, u32)) -> ((u32, u32), (u32, u32)) {
         if a <= b { (a, b) } else { (b, a) }
     }
@@ -358,7 +342,7 @@ mod tests {
         assert_eq!(b.len() - a.len(), 8, "2x2 blocks x 2 diagonals each");
     }
 
-    /// Closed form for a fully occupied grid, checked over a range of shapes.
+    /// Closed form for a full grid, over a range of shapes.
     #[test]
     fn square_edge_counts_match_the_closed_form() {
         for (r, c) in [(1, 1), (1, 7), (7, 1), (2, 2), (5, 9), (16, 16)] {
@@ -378,8 +362,7 @@ mod tests {
         }
     }
 
-    /// The property that would break if a forward offset were double-counted: duplicate
-    /// entries are summed on construction, so a double emission shows up as weight 2.0.
+    /// Duplicates are summed on construction, so a double emission shows up as weight 2.0.
     #[test]
     fn every_edge_has_weight_exactly_one() {
         for lattice in [Lattice::Square4, Lattice::Square8, Lattice::VisiumHex] {
@@ -406,7 +389,7 @@ mod tests {
                 _ => full_square(r, c),
             };
             let g = lattice_graph(&rows, &cols, lattice).unwrap();
-            // Hex reaches two columns sideways, so its interior starts one further in.
+            // hex reaches two columns sideways, so interior starts one further in
             let margin = if lattice == Lattice::VisiumHex { 2 } else { 1 };
             let mut checked = 0;
             for v in 0..g.node_count() {
@@ -424,8 +407,7 @@ mod tests {
         }
     }
 
-    /// Visium's parity: neighbours of an even-parity spot are also even-parity, which is what
-    /// makes the doubled-coordinate scheme self-consistent.
+    /// Neighbours of an even-parity spot are also even-parity.
     #[test]
     fn hex_neighbours_preserve_parity_and_are_the_six_offsets() {
         let (rows, cols) = full_hex(9, 13);
@@ -446,7 +428,7 @@ mod tests {
         }
     }
 
-    /// Boundary spots, worked out by hand on the layout in the module docs.
+    /// Boundary spots, worked out by hand.
     #[test]
     fn hex_boundary_degrees_are_exact() {
         let (rows, cols) = full_hex(5, 9);
@@ -463,7 +445,7 @@ mod tests {
         assert_eq!(g.degree(at(4, 8)), 2, "opposite corner");
     }
 
-    /// Tissue masking removes spots; the remaining ones must simply lose those edges.
+    /// Masking removes spots; the rest just lose those edges.
     #[test]
     fn missing_positions_leave_holes_rather_than_shifting_neighbours() {
         let (rows, cols) = full_square(5, 5);
@@ -519,8 +501,7 @@ mod tests {
         }
     }
 
-    /// Real Visium geometry: 78 rows, `array_col` 0..126 even / 1..127 odd, 64 spots per row.
-    /// Verified against 10x's Space Ranger spatial-outputs documentation.
+    /// Real Visium geometry per Space Ranger docs: 78 rows, 64 spots each.
     #[test]
     fn matches_the_documented_visium_capture_area() {
         let mut rows = Vec::new();
@@ -535,7 +516,7 @@ mod tests {
 
         let g = lattice_graph(&rows, &cols, Lattice::VisiumHex).unwrap();
         assert_eq!(g.node_count(), 4992);
-        // Interior spots: rows 1..77 with both in-row neighbours present.
+        // interior spots: rows 1..77 with both in-row neighbours
         let interior = (0..g.node_count())
             .filter(|&v| rows[v] > 0 && rows[v] < 77 && cols[v] >= 2 && cols[v] <= 125)
             .count();
@@ -547,7 +528,7 @@ mod tests {
         }
     }
 
-    /// The trap: offset coordinates look like valid input but describe a different lattice.
+    /// Offset coordinates look valid but describe a different lattice.
     #[test]
     fn rejects_offset_coordinates_masquerading_as_doubled() {
         let (rows, doubled) = full_hex(9, 13);
@@ -559,11 +540,11 @@ mod tests {
             ),
             "offset coordinates must not be silently accepted"
         );
-        // Square lattices have no parity constraint, so they stay unaffected.
+        // square lattices have no parity constraint
         assert!(lattice_graph(&rows, &offset, Lattice::Square4).is_ok());
     }
 
-    /// A shifted origin is still doubled, so it must be allowed.
+    /// A shifted origin is still doubled.
     #[test]
     fn accepts_a_shifted_hex_origin() {
         let (rows, cols) = full_hex(9, 13);
@@ -573,8 +554,7 @@ mod tests {
         assert_eq!(g.edge_count(), reference.edge_count());
     }
 
-    /// All six neighbours must land at exactly `pitch` in the rescaled space — the property
-    /// that makes distance-based methods safe on Visium.
+    /// All six neighbours land at exactly `pitch` once rescaled.
     #[test]
     fn isometric_coords_equalise_all_six_neighbours() {
         let (rows, cols) = full_hex(9, 13);
@@ -591,8 +571,7 @@ mod tests {
             }
         }
 
-        // And nothing else is that close, so a radius query at 1.1x pitch is exactly the
-        // lattice — which is what makes the isometric form usable for kNN.
+        // and nothing else is that close, so radius at 1.1x pitch is exactly the lattice
         let v = (0..g.node_count())
             .find(|&v| rows[v] == 4 && cols[v] == 6)
             .unwrap();
@@ -627,13 +606,12 @@ mod tests {
         assert_eq!(single.node_count(), 1);
         assert_eq!(single.edge_count(), 0);
 
-        // Far apart, so nothing is adjacent.
+        // far apart, nothing adjacent
         let scattered = lattice_graph(&[0, 100, 200], &[0, 100, 200], Lattice::Square8).unwrap();
         assert_eq!(scattered.edge_count(), 0);
     }
 
-    /// Leiden guarantees internally-connected communities, so on a lattice every domain must
-    /// be a spatially contiguous region. This is the property the whole approach rests on.
+    /// Internally-connected communities on a lattice means spatially contiguous domains.
     #[test]
     fn leiden_domains_are_spatially_contiguous() {
         use crate::community_search::leiden::{LeidenConfig, ObjectiveKind, leiden};
@@ -661,7 +639,7 @@ mod tests {
         }
     }
 
-    /// Coordinates at the top of the `u32` range must not wrap when an offset goes negative.
+    /// Top of the `u32` range must not wrap on a negative offset.
     #[test]
     fn extreme_coordinates_do_not_wrap() {
         let rows = [0u32, 0, u32::MAX, u32::MAX];
@@ -670,9 +648,8 @@ mod tests {
         assert_eq!(g.edge_count(), 0, "corners of the space are not adjacent");
     }
 
-    /// Visium HD at 2 µm. Sources disagree on the grid: 10x's row count implies 3350², while
-    /// spatialdata documents 3250². Only a size for the benchmark, so either does — but the
-    /// builder never assumes an extent, and callers shouldn't either.
+    /// Visium HD at 2 µm. Sources disagree on the extent (3350² vs 3250²); it's only a
+    /// benchmark size, and the builder never assumes one.
     ///
     /// ```text
     /// cargo test --release --no-default-features visium_hd_scale -- --ignored --nocapture

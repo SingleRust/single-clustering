@@ -1,17 +1,13 @@
 //! Differential tests for the BANKSY feature augmentation.
 //!
-//! Fixtures come from `banksy-py` itself via `tools/gen_banksy_fixtures.py` — the reference's
-//! own `generate_spatial_weights_fixed_nbrs` and `concatenate_all`, not a reimplementation of
-//! them. So this checks against what BANKSY computes rather than against a reading of the
-//! paper. Fixtures are committed; the suite needs no Python.
+//! Fixtures come from `banksy-py`'s own functions via `tools/gen_banksy_fixtures.py`, not a
+//! reimplementation, so this checks what BANKSY computes rather than a reading of the paper.
+//! Three things it pins that the paper alone would get wrong: the λ budget halves per
+//! harmonic, blocks are z-scored before scaling, and the gradient is centred on its own
+//! neighbourhood first.
 //!
-//! Three things this pins that a formula transcribed from the paper would get wrong: the λ
-//! budget halves with each harmonic rather than splitting evenly, every block is z-scored
-//! before scaling, and the gradient term is centred on its own neighbourhood first.
-//!
-//! Tolerance is 1e-6, not tighter, because the reference stores azimuths as `float32`
-//! (`theta_data = np.zeros_like(..., dtype=np.float32)`). We carry f64 throughout, so the
-//! residual is the reference's precision, not ours.
+//! Tolerance is 1e-6 because the reference stores azimuths as `float32`. We carry f64, so the
+//! residual is theirs.
 
 use serde_json::Value;
 use single_clustering::spatial::banksy::{Decay, NeighbourhoodOperator, banksy_matrix};
@@ -71,9 +67,9 @@ fn max_abs_diff(a: &[f64], b: &[f64]) -> (f64, usize) {
     worst
 }
 
-/// Points on a regular grid have many exactly-equidistant neighbours, and nothing specifies
-/// which of them a k-nearest search returns. Our tie-break is (distance, index); sklearn's is
-/// unspecified, so that case is compared structurally elsewhere rather than value-for-value.
+/// A regular grid has many equidistant neighbours and nothing specifies which a kNN search
+/// returns. Ours breaks on (distance, index); sklearn's is unspecified, so grids are compared
+/// structurally elsewhere.
 fn has_distance_ties(name: &str) -> bool {
     name.starts_with("grid")
 }
@@ -171,9 +167,8 @@ fn augmented_matrix_matches_the_reference() {
     assert!(checked >= 10, "only {checked} matrices compared");
 }
 
-/// On a regular grid the neighbour *set* is ambiguous, but the neighbourhood mean over a
-/// symmetric lattice should still land close — a large gap would mean something worse than a
-/// tie-break difference.
+/// The neighbour set is ambiguous on a grid, but the mean over a symmetric lattice should
+/// still land close. A large gap would mean worse than a tie-break difference.
 #[test]
 fn grid_case_agrees_up_to_tie_breaking() {
     let f = fixtures();

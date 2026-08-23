@@ -1,18 +1,18 @@
 //! Refinement — what makes this Leiden and not Louvain.
 //!
-//! Re-derives a finer partition inside each community local moving found, from singletons,
-//! merging only within a community. Aggregation then collapses the *refined* communities, so
-//! Louvain's badly-connected (sometimes disconnected) communities don't get locked in.
+//! Re-derives a finer partition inside each community local moving found, starting from
+//! singletons. Aggregation then collapses the *refined* communities, so Louvain's
+//! badly-connected ones don't get locked in.
 //!
-//! Two rules, both of which the previous implementation got wrong:
+//! Two rules, both of which the pre-0.7 implementation got wrong:
 //!
-//! 1. Only singletons may merge — once absorbed, a node is never moved again. Otherwise
-//!    refined communities stop being bottom-up unions and the guarantee is gone.
+//! 1. Only singletons may merge. Once absorbed a node never moves again, otherwise refined
+//!    communities stop being bottom-up unions and the guarantee is gone.
 //! 2. Moves stay inside the constraining community.
 //!
 //! Candidate selection is randomised (Leiden paper, Algorithm 3): draw with probability
-//! proportional to `exp(gain / randomness)`. Greedy argmax gets stuck somewhere repeated
-//! passes can't escape; this is how it explores past that. `randomness = 0.0` is greedy.
+//! proportional to `exp(gain / randomness)`. Greedy argmax gets stuck where repeated passes
+//! can't help. `randomness = 0.0` is greedy.
 
 use rand::Rng;
 use rand_chacha::ChaCha8Rng;
@@ -23,9 +23,8 @@ use crate::network::CSRNetwork;
 
 /// Builds a refined partition inside the communities of `constraint`.
 ///
-/// Every refined community sits inside exactly one community of `constraint`. One pass over a
-/// shuffled order is enough — only singletons merge and each node is seen once, so it can't
-/// cycle. That's why zero-gain merges are safe to accept here; they help escape plateaus.
+/// One pass over a shuffled order is enough: only singletons merge and each node is seen once,
+/// so it can't cycle. That's why zero-gain merges are safe here — they escape plateaus.
 pub fn refine(
     graph: &CSRNetwork,
     constraint: &[u32],
@@ -40,7 +39,7 @@ pub fn refine(
         return Partition::singleton(graph);
     }
 
-    // relative to a typical edge, so rescaling weights doesn't change behaviour
+    // relative to a typical edge, so rescaling weights changes nothing
     let mean_edge_weight = if graph.edge_count() > 0 {
         graph.total_weight() / graph.edge_count() as f64
     } else {
@@ -48,18 +47,14 @@ pub fn refine(
     };
     let randomness = randomness * mean_edge_weight;
 
-    // One draw per node, taken up front in node order. Previously each `select` pulled from a
-    // shared stream, so a node's randomness depended on how many nodes before it happened to
-    // need one — which couples communities that are otherwise independent, and would make the
-    // result depend on how the work was divided. Drawing per node decouples them.
+    // one draw per node, up front. A shared stream would make a node's randomness depend on
+    // how many before it needed one, coupling communities that are otherwise independent.
     let draws: Vec<f64> = (0..n).map(|_| rng.random::<f64>()).collect();
 
-    // Visit order stays globally shuffled; bucketing preserves each community's relative
-    // order within it, so the sequence a community sees is what it would have seen anyway.
+    // bucketing keeps each community's relative order, so it sees the same sequence either way
     let order = scratch.shuffled_order(n, rng);
-    // Sized by the largest constraint id, not by the node count: these ids are inherited from
-    // the previous level's working partition, so at level 1 and above they routinely exceed
-    // the number of nodes in the current graph.
+    // sized by the largest constraint id, not the node count — these are inherited from the
+    // previous level and routinely exceed it
     let slots = constraint
         .iter()
         .copied()
@@ -112,17 +107,15 @@ pub fn refine(
         }
     }
 
-    // Rebuild a full partition from the labels, so every aggregate is exactly right rather
-    // than incrementally maintained across a parallel split.
+    // rebuild from the labels, so aggregates are exact rather than maintained across a split
     let as_usize: Vec<usize> = labels.iter().map(|&c| c as usize).collect();
     Partition::from_membership(graph, &as_usize)
 }
 
 /// Draws a candidate with probability proportional to `exp(gain / randomness)`.
 ///
-/// Subtracting `best_rel` before exponentiating keeps weights in `(0, 1]`, so a large
-/// gain/randomness ratio can't overflow. `randomness <= 0` is a deterministic argmax, ties
-/// going to the lowest id so traversal order never shows through.
+/// Subtracting `best_rel` first keeps weights in `(0, 1]` so a large ratio can't overflow.
+/// `randomness <= 0` is argmax, ties to the lowest id.
 fn select(
     candidates: &[(usize, f64)],
     best_rel: f64,
@@ -170,15 +163,13 @@ fn select(
 
 /// Refines one constraining community, independently of every other.
 ///
-/// This is the whole basis for running refinement in parallel: a node may only merge with
-/// refined communities inside its own constraining community, so two constraining communities
-/// share no state at all. Working on local ids rather than the global partition is what makes
-/// that disjointness visible to the compiler instead of merely true.
+/// A node can only merge inside its own constraining community, so two of them share no state.
+/// Local ids rather than the global partition is what makes that disjointness visible to the
+/// compiler instead of merely true.
 ///
-/// `members` are the community's global node ids in the order they should be visited;
-/// `sorted` is the same set ascending, for global-to-local lookup. Writes each member's
-/// refined label into `out`, as a global node id — the id of the member that community formed
-/// around, so labels from different communities can never collide.
+/// `members` is the community's global node ids in visit order, `sorted` the same set
+/// ascending for global-to-local lookup. Each member's label goes into `out` as the global id
+/// its refined community formed around, so labels can't collide across communities.
 #[allow(clippy::too_many_arguments)]
 fn refine_into(
     graph: &CSRNetwork,
@@ -198,9 +189,8 @@ fn refine_into(
     let local_of =
         |g: u32| -> usize { sorted.binary_search(&g).expect("member of this community") };
 
-    // Local singleton partition: community i starts as node i. Only the three aggregates
-    // `delta_insert_view` reads are tracked; `internal` is never consulted during refinement,
-    // and the caller rebuilds a full partition from the labels afterwards.
+    // local singleton partition. Only the three aggregates `delta_insert_view` reads are
+    // tracked; `internal` is never consulted here, and the caller rebuilds anyway.
     let mut membership: Vec<u32> = (0..k as u32).collect();
     let mut size = vec![1u32; k];
     let mut strength = vec![0.0f64; k];
@@ -210,7 +200,7 @@ fn refine_into(
         weight[local] = graph.node_weight(g as usize);
     }
 
-    // Weight from the current node to each local community, cleared via `touched`.
+    // weight to each local community, cleared via `touched`
     let mut to_comm = vec![0.0f64; k];
     let mut touched: Vec<usize> = Vec::new();
     let mut candidates: Vec<(usize, f64)> = Vec::new();
@@ -229,8 +219,8 @@ fn refine_into(
         }
         touched.clear();
 
-        // rule 2: stay inside the constraint — neighbours outside it are simply not in
-        // `sorted`, so the binary search filters them out.
+        // rule 2: neighbours outside the constraint aren't in `sorted`, so the search
+        // filters them out
         for (u, w) in graph.neighbors(g as usize) {
             if u == g as usize {
                 continue;
@@ -247,7 +237,7 @@ fn refine_into(
         let ctx = InsertContext::for_node(graph, g as usize);
         let weight_to_own = to_comm[own];
 
-        // Take the node out. Its own community is a singleton, so it empties.
+        // take it out; its community is a singleton, so it empties
         size[own] -= 1;
         strength[own] -= ctx.node_strength;
         weight[own] -= ctx.node_weight;
@@ -294,9 +284,8 @@ fn refine_into(
         membership[v] = target as u32;
     }
 
-    // Label each member by the global id its refined community formed around, so labels are
-    // unique across communities without any coordination between them.
-    // `out` is indexed locally, matching `sorted`; the caller scatters it to global ids.
+    // label by the global id the refined community formed around, so labels are unique
+    // without coordination. `out` is local, matching `sorted`; the caller scatters it.
     for local in 0..k {
         out[local] = sorted[membership[local] as usize];
     }
@@ -350,7 +339,7 @@ mod tests {
 
     #[test]
     fn a_single_constraint_community_can_still_split() {
-        // one constraint community, should still split the barbell rather than merge it
+        // one constraint community; must still split the barbell
         let g = barbell();
         let constraint: Vec<u32> = vec![0; 10];
         let mut scratch = MoveScratch::with_capacity(g.node_count(), g.node_count());

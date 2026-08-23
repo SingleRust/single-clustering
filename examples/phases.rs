@@ -4,8 +4,8 @@
 //! cargo run --release --no-default-features --example phases -- 1000000
 //! ```
 //!
-//! Replicates the driver in `leiden::run_once` using the public API, so the phase split is
-//! measured on exactly the work the real driver does. Answers "what is worth parallelising".
+//! Replicates `leiden::run_once` through the public API, so the split is measured on exactly
+//! the work the real driver does. Answers what's worth parallelising.
 
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;

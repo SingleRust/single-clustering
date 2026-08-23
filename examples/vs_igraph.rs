@@ -5,9 +5,9 @@
 //! uv run tools/igraph_bench.py /tmp/bench
 //! ```
 //!
-//! Writes the graph to `<dir>/edges.tsv` so both sides cluster the identical input, and
-//! times only `leiden()` — graph construction is excluded on both sides, because including
-//! it measures the pipeline rather than the algorithm.
+//! Writes the graph to `<dir>/edges.tsv` so both sides cluster the identical input, and times
+//! only `leiden()`. Construction is excluded on both sides — including it would measure the
+//! pipeline, not the algorithm.
 
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;

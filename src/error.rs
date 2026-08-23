@@ -63,11 +63,9 @@ pub enum ClusteringError {
         /// The two node indices sharing it.
         nodes: (usize, usize),
     },
-    /// Visium hex positions did not all share the same `(row + col)` parity.
-    ///
-    /// In doubled coordinates every spot has the same parity, so mixed parity means the
-    /// coordinates are not doubled — most often offset coordinates (`col / 2`), which would
-    /// silently produce a wrong graph rather than an empty one.
+    /// Visium hex positions didn't all share the same `(row + col)` parity, so they aren't
+    /// doubled coordinates. Usually offset coordinates (`col / 2`), which would give a wrong
+    /// graph rather than an empty one.
     InconsistentHexParity {
         /// A node with the majority parity.
         expected_node: usize,
@@ -76,11 +74,9 @@ pub enum ClusteringError {
         /// The offending position.
         position: (u32, u32),
     },
-    /// No triangulation exists for the given points — they are collinear, or fewer than
-    /// three distinct positions.
-    ///
-    /// Reported rather than returning an edgeless graph, which would cluster into singletons
-    /// and look like a result.
+    /// No triangulation exists: collinear, or fewer than three distinct positions. An error
+    /// rather than an edgeless graph, which would cluster into singletons and look like a
+    /// result.
     DegenerateTriangulation {
         /// How many points were supplied.
         n_points: usize,
@@ -92,11 +88,8 @@ pub enum ClusteringError {
         /// Expected length, from the first array supplied.
         expected: usize,
     },
-    /// The adjacency is not symmetric, so `Σ strength != 2 · total_weight`.
-    ///
-    /// Most often means an un-symmetrised k-NN graph was passed to
-    /// `CSRNetwork::from_csr_parts`: if `j` is among `i`'s nearest neighbours but `i` is not
-    /// among `j`'s, the matrix has an entry in one direction only.
+    /// Adjacency isn't symmetric, so `Σ strength != 2 · total_weight`. Usually an
+    /// un-symmetrised kNN graph handed to `CSRNetwork::from_csr_parts`.
     AsymmetricGraph {
         /// The observed sum of node strengths.
         degree_sum: f64,

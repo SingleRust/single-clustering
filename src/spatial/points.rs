@@ -1,12 +1,11 @@
-//! Neighbour graphs from point coordinates, for assays that are not on a lattice.
+//! Neighbour graphs from point coordinates, for assays that aren't on a lattice.
 //!
-//! Xenium, MERFISH, CosMx and Slide-seq give each cell a position rather than a grid slot, so
-//! neighbours have to be searched for. Both builders here are exact, over the uniform grid in
-//! [`grid`](super::grid) — no approximation, so no recall gaps to make a graph
-//! irreproducible. Both are checked against brute force on degenerate inputs.
+//! Xenium, MERFISH, CosMx and Slide-seq give positions rather than grid slots, so neighbours
+//! have to be searched for. Both builders are exact over the uniform grid in
+//! [`grid`](super::grid), and both are checked against brute force on degenerate inputs.
 //!
-//! On Visium data, pass [`visium_isometric_coords`](super::visium_isometric_coords) rather
-//! than raw lattice coordinates; see the module docs for why.
+//! On Visium, pass [`visium_isometric_coords`](super::visium_isometric_coords) instead of raw
+//! lattice coordinates.
 
 use rayon::prelude::*;
 
@@ -14,19 +13,17 @@ use crate::error::{ClusteringError, Result};
 use crate::network::{CSRNetwork, MAX_NODES};
 use crate::spatial::grid::{Grid, distance_sq};
 
-/// How to reconcile the two directions of a k-nearest-neighbour relation.
+/// How to reconcile the two directions of a kNN relation.
 ///
-/// kNN is directed — `j` being among `i`'s nearest does not make `i` among `j`'s — but the
-/// quality functions need a symmetric graph, so one of these has to be chosen.
+/// kNN is directed, the quality functions need symmetry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Symmetry {
-    /// Keep an edge if either endpoint chose the other. Degrees come out at or above `k`.
-    /// This is what scanpy and squidpy do.
+    /// Keep an edge if either endpoint chose the other, so degree >= `k`. What scanpy and
+    /// squidpy do.
     #[default]
     Union,
-    /// Keep an edge only if both endpoints chose each other. Degrees come out at or below
-    /// `k`, and the graph is sparser and more conservative — hub cells stop dragging in
-    /// distant neighbours.
+    /// Keep an edge only if both chose each other, so degree <= `k`. Sparser, and hub cells
+    /// stop dragging in distant neighbours.
     Intersection,
 }
 
@@ -35,8 +32,7 @@ pub enum Symmetry {
 pub enum SpatialWeight {
     /// Every edge weighs 1.0. Adjacency alone carries the signal.
     Uniform,
-    /// `exp(-d² / (2σ²))`, so nearby cells count for more. `sigma` is in the same units as
-    /// the coordinates.
+    /// `exp(-d² / (2σ²))`. `sigma` is in coordinate units.
     Gaussian {
         /// Kernel bandwidth.
         sigma: f64,
@@ -70,7 +66,7 @@ impl SpatialWeight {
     }
 }
 
-/// A neighbour and the square of its distance, kept squared to avoid a pointless `sqrt`.
+/// A neighbour and its squared distance — squared to skip a pointless `sqrt`.
 type Candidate = (u32, f64);
 
 fn validate_points<const D: usize>(points: &[[f64; D]]) -> Result<()> {
@@ -91,19 +87,17 @@ fn validate_points<const D: usize>(points: &[[f64; D]]) -> Result<()> {
 
 /// Joins every pair of points closer than `radius`.
 ///
-/// The relation is symmetric by construction, so no reconciliation step is needed and the
-/// result does not depend on any tie-breaking. `radius` is in coordinate units — for spatial
-/// assays that means it is directly interpretable, e.g. 30 µm.
+/// Symmetric by construction, so no reconciliation and no tie-breaking. `radius` is in
+/// coordinate units, e.g. 30 µm.
 ///
-/// Degree is unbounded: in dense tissue a generous radius can give a cell thousands of
-/// neighbours, and cost downstream is linear in degree. `max_degree` caps it by keeping only
-/// the nearest, but note the cap is applied **before** symmetrisation, so a node can still
-/// finish slightly above it when a neighbour kept an edge it dropped.
+/// Degree is unbounded — a generous radius in dense tissue gives thousands of neighbours, and
+/// downstream cost is linear in degree. `max_degree` caps it, but before symmetrisation, so a
+/// node can finish slightly over when a neighbour kept an edge it dropped.
 ///
 /// # Errors
 ///
-/// If `radius` is not finite and positive, a coordinate is not finite, or there are more
-/// points than `u32` adjacency can address.
+/// If `radius` isn't finite and positive, a coordinate isn't finite, or there are more points
+/// than `u32` adjacency can address.
 pub fn radius_graph<const D: usize>(
     points: &[[f64; D]],
     radius: f64,
@@ -121,8 +115,7 @@ pub fn radius_graph<const D: usize>(
         return CSRNetwork::from_csr_parts(vec![0], Vec::new(), Vec::new(), None);
     }
 
-    // Cells the size of the radius, so everything in range sits in the 3^D block around a
-    // point and one ring is all that ever needs visiting.
+    // cells the size of the radius, so one ring covers everything in range
     let grid = Grid::new(points, radius);
     let r2 = radius * radius;
 
@@ -143,8 +136,7 @@ pub fn radius_graph<const D: usize>(
                     }
                 });
             }
-            // Sorted by (distance, id) so a capped result never depends on visit order —
-            // points at equal distance are the norm on regular tissue.
+            // (distance, id) so a capped result doesn't depend on visit order
             found.sort_unstable_by(|a, b| a.1.partial_cmp(&b.1).unwrap().then(a.0.cmp(&b.0)));
             if let Some(cap) = max_degree {
                 found.truncate(cap);
@@ -153,22 +145,21 @@ pub fn radius_graph<const D: usize>(
         })
         .collect();
 
-    // Capping breaks symmetry, so restore it. Without a cap this is already a no-op.
+    // capping breaks symmetry; without a cap this is a no-op
     if max_degree.is_some() {
         symmetrise(&mut adjacency, Symmetry::Union);
     }
     assemble(adjacency, weight)
 }
 
-/// Joins every point to its `k` nearest neighbours, then makes the relation symmetric.
+/// Joins every point to its `k` nearest, then symmetrises.
 ///
-/// Ties are broken on the lower node index, so a fixed input gives a fixed graph even where
-/// many points sit at identical coordinates — which happens whenever coordinates have been
-/// rounded to a pixel grid.
+/// Ties break on the lower node index, so coordinates rounded to a pixel grid still give a
+/// fixed graph.
 ///
 /// # Errors
 ///
-/// If `k` is zero, a coordinate is not finite, or there are more points than `u32` adjacency
+/// If `k` is zero, a coordinate isn't finite, or there are more points than `u32` adjacency
 /// can address.
 pub fn knn_graph<const D: usize>(
     points: &[[f64; D]],
@@ -187,7 +178,7 @@ pub fn knn_graph<const D: usize>(
         return CSRNetwork::from_csr_parts(vec![0], Vec::new(), Vec::new(), None);
     }
 
-    // Aim for a handful of points per cell, so the first ring or two usually suffices.
+    // a handful of points per cell, so one or two rings usually suffice
     let grid = Grid::new(points, typical_spacing(points, k));
 
     let mut adjacency: Vec<Vec<Candidate>> = points
@@ -207,9 +198,9 @@ pub fn knn_graph<const D: usize>(
                 if found.len() < k {
                     continue;
                 }
-                // Anything still unvisited sits at Chebyshev distance >= ring + 1, so it is
-                // at least `ring * cell` away — a point can be anywhere inside its own cell,
-                // which costs one ring of slack. Once the k-th best beats that, stop.
+                // unvisited points are >= ring+1 cells out, so at least `ring * cell` away
+                // (one ring of slack, since a point sits anywhere in its cell). Stop once
+                // the k-th best beats that.
                 found.sort_unstable_by(|a, b| a.1.partial_cmp(&b.1).unwrap().then(a.0.cmp(&b.0)));
                 found.truncate(k.max(1).min(found.len()));
                 let safe = ring as f64 * grid.cell_size();
@@ -228,7 +219,7 @@ pub fn knn_graph<const D: usize>(
     assemble(adjacency, weight)
 }
 
-/// A cell size that puts roughly `k` points in each cell.
+/// Cell size putting roughly `k` points per cell.
 fn typical_spacing<const D: usize>(points: &[[f64; D]], k: usize) -> f64 {
     let mut min = [f64::INFINITY; D];
     let mut max = [f64::NEG_INFINITY; D];
@@ -249,13 +240,12 @@ fn typical_spacing<const D: usize>(points: &[[f64; D]], k: usize) -> f64 {
 
 /// Rewrites `adjacency` in place so `j ∈ adj[i]` exactly when `i ∈ adj[j]`.
 ///
-/// Done explicitly rather than by emitting both directions and letting construction merge
-/// them: duplicates are *summed* there, which would quietly give mutual pairs twice the
-/// weight of one-sided ones.
+/// Explicit rather than emitting both directions and letting construction merge them:
+/// duplicates are summed there, so mutual pairs would end up at twice the weight.
 fn symmetrise(adjacency: &mut [Vec<Candidate>], symmetry: Symmetry) {
     let n = adjacency.len();
 
-    // Reverse lists via counting sort — O(total edges), and no per-node allocation.
+    // counting sort, so O(edges) and no per-node allocation
     let mut counts = vec![0u32; n + 1];
     for list in adjacency.iter() {
         for &(u, _) in list {
@@ -337,14 +327,14 @@ mod tests {
         out
     }
 
-    /// On a unit grid the radius picks out a known connectivity, so this is exact.
+    /// On a unit grid the radius picks out a known connectivity.
     #[test]
     fn radius_on_a_unit_grid_is_exactly_the_expected_connectivity() {
         let pts = grid(6);
         let four = radius_graph(&pts, 1.01, SpatialWeight::Uniform, None).unwrap();
         let eight = radius_graph(&pts, 1.5, SpatialWeight::Uniform, None).unwrap();
 
-        // 6x6 grid: 4-connected has 2*6*5 = 60 edges, 8-connected adds 2*5*5 = 50 diagonals.
+        // 6x6: 4-connected is 2*6*5 = 60 edges, 8-connected adds 2*5*5 = 50 diagonals
         assert_eq!(four.edge_count(), 60);
         assert_eq!(eight.edge_count(), 110);
         assert!(edge_set(&four).is_subset(&edge_set(&eight)));
@@ -357,8 +347,7 @@ mod tests {
         }
     }
 
-    /// A radius relation is symmetric before anything is done to it, so this must hold with
-    /// no reconciliation step at all.
+    /// A radius relation is symmetric with no reconciliation at all.
     #[test]
     fn radius_is_symmetric_without_reconciliation() {
         let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(4);
@@ -370,7 +359,7 @@ mod tests {
         assert!(g.edge_count() > 0);
     }
 
-    /// The cross-check that matters: the two builders must agree on Visium.
+    /// The two builders must agree on Visium.
     #[test]
     fn isometric_radius_reproduces_the_exact_hex_lattice() {
         use crate::spatial::lattice::{Lattice, lattice_graph, visium_isometric_coords};
@@ -386,7 +375,7 @@ mod tests {
 
         let (x, y) = visium_isometric_coords(&rows, &cols, 100.0).unwrap();
         let pts: Vec<[f64; 2]> = x.iter().zip(&y).map(|(&a, &b)| [a, b]).collect();
-        // Anything past the pitch but short of the next shell at pitch*sqrt(3).
+        // past the pitch, short of the next shell at pitch*sqrt(3)
         let searched = radius_graph(&pts, 110.0, SpatialWeight::Uniform, None).unwrap();
 
         assert_eq!(edge_set(&exact), edge_set(&searched));
@@ -416,13 +405,12 @@ mod tests {
         }
     }
 
-    /// Coordinates rounded to a pixel grid produce many exact ties; those must not make the
-    /// result depend on kd-tree traversal order.
+    /// Pixel-rounded coordinates make many exact ties, which must not decide the result.
     #[test]
     fn duplicate_points_still_give_a_deterministic_graph() {
         let mut pts = Vec::new();
         for i in 0..40 {
-            // Four coincident points at each of ten sites.
+            // four coincident points at each of ten sites
             for _ in 0..4 {
                 pts.push([(i % 10) as f64, 0.0]);
             }
@@ -444,7 +432,7 @@ mod tests {
         let g = radius_graph(&pts, 2.5, SpatialWeight::Gaussian { sigma: 1.0 }, None).unwrap();
 
         let w = |a: usize, b: usize| g.neighbors(a).find(|&(u, _)| u == b).unwrap().1;
-        // exp(-1/2) and exp(-4/2), to f32 precision.
+        // exp(-1/2) and exp(-4/2), to f32 precision
         assert!((w(0, 1) - (-0.5f64).exp()).abs() < 1e-6, "got {}", w(0, 1));
         assert!((w(0, 2) - (-2.0f64).exp()).abs() < 1e-6, "got {}", w(0, 2));
         assert!(w(0, 1) > w(0, 2));
@@ -453,7 +441,7 @@ mod tests {
 
     #[test]
     fn max_degree_bounds_the_hubs() {
-        // One dense clump: without a cap, every point sees every other.
+        // one dense clump: uncapped, every point sees every other
         let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(2);
         let pts: Vec<[f64; 2]> = (0..200)
             .map(|_| [rng.random::<f64>(), rng.random::<f64>()])
@@ -464,7 +452,7 @@ mod tests {
         assert_eq!(uncapped.degree(0), 199, "everything is within the radius");
         capped.validate_symmetry().unwrap();
         assert!(capped.edge_count() < uncapped.edge_count() / 5);
-        // Documented as a soft cap: symmetrisation can push a node back over it.
+        // soft cap: symmetrisation can push a node back over
         for v in 0..pts.len() {
             assert!(capped.degree(v) >= 10, "each node keeps its own 10");
         }
@@ -479,7 +467,7 @@ mod tests {
             .collect();
         let g = radius_graph(&pts, 1.01, SpatialWeight::Uniform, None).unwrap();
         g.validate_symmetry().unwrap();
-        // 4x4x4 grid, 6-connected: 3 * 4 * 4 * 3 = 144 edges.
+        // 4x4x4, 6-connected: 3 * 4 * 4 * 3 = 144 edges
         assert_eq!(g.edge_count(), 144);
         let interior = (0..pts.len())
             .find(|&v| pts[v].iter().all(|&c| c > 0.0 && c < 3.0))
@@ -507,7 +495,7 @@ mod tests {
             perm.shuffle(&mut rng);
             let shuffled: Vec<[f64; 2]> = perm.iter().map(|&i| pts[i]).collect();
             let g = knn_graph(&shuffled, 5, Symmetry::Union, SpatialWeight::Uniform).unwrap();
-            // Map back through the permutation and compare as sets.
+            // map back through the permutation, compare as sets
             let mapped: HashSet<(u64, u64)> = edge_set(&g)
                 .into_iter()
                 .map(|(a, b)| {
@@ -519,11 +507,11 @@ mod tests {
         }
     }
 
-    /// `KdTree` panics past 32 items sharing a value on one axis. Spatial data does that as a
-    /// matter of course, so this covers the shapes that actually occur.
+    /// `KdTree` panics past 32 items sharing an axis value, which spatial data does
+    /// routinely. These are the shapes that actually occur.
     #[test]
     fn survives_heavy_axis_alignment() {
-        // A full Visium row is 64 spots at one y; a capture area is 78 of them.
+        // a full Visium row is 64 spots at one y, a capture area 78 of them
         let mut visium = Vec::new();
         for r in 0..78 {
             for i in 0..64 {
@@ -534,12 +522,12 @@ mod tests {
         g.validate_symmetry().unwrap();
         assert_eq!(g.node_count(), 4992);
 
-        // A whole HD-sized row at a single y.
+        // a whole HD-sized row at a single y
         let row: Vec<[f64; 2]> = (0..3250).map(|i| [i as f64, 0.0]).collect();
         let g = radius_graph(&row, 1.5, SpatialWeight::Uniform, None).unwrap();
         assert_eq!(g.edge_count(), 3249, "a path along the row");
 
-        // Every point identical — the worst case for any tree.
+        // every point identical, the worst case for any tree
         let same = vec![[7.0, 7.0]; 200];
         for sym in [Symmetry::Union, Symmetry::Intersection] {
             let g = knn_graph(&same, 5, sym, SpatialWeight::Uniform).unwrap();
@@ -549,8 +537,7 @@ mod tests {
         }
     }
 
-    /// Point sets covering the shapes that break spatial indices: duplicates, collinear runs,
-    /// tight clumps, near-empty space.
+    /// Shapes that break spatial indices: duplicates, collinear runs, clumps, empty space.
     fn awkward_point_sets(seed: u64) -> Vec<(String, Vec<[f64; 2]>)> {
         let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
         let mut out: Vec<(String, Vec<[f64; 2]>)> = Vec::new();
@@ -600,7 +587,7 @@ mod tests {
         out
     }
 
-    /// The radius search must agree with O(n²) brute force exactly, on every shape.
+    /// Must agree with O(n²) brute force exactly, on every shape.
     #[test]
     fn radius_matches_brute_force() {
         for (name, pts) in awkward_point_sets(21) {
@@ -623,13 +610,12 @@ mod tests {
         }
     }
 
-    /// The k-nearest search must pick exactly the same neighbours brute force would,
-    /// including how it breaks ties.
+    /// Must pick exactly what brute force does, ties included.
     #[test]
     fn knn_matches_brute_force() {
         for (name, pts) in awkward_point_sets(22) {
             for &k in &[1usize, 3, 8] {
-                // Compare pre-symmetrisation, which is where the search itself is decided.
+                // pre-symmetrisation, where the search itself is decided
                 let mut want: Vec<Vec<u32>> = Vec::with_capacity(pts.len());
                 for i in 0..pts.len() {
                     let mut all: Vec<(f64, u32)> = (0..pts.len())
@@ -647,8 +633,8 @@ mod tests {
                     want.push(ids);
                 }
 
-                // Intersection keeps only mutual pairs, so recover the directed lists by
-                // asking for the union and checking containment both ways instead.
+                // intersection keeps only mutual pairs, so recover the directed lists from
+                // the union plus a containment check both ways
                 let g = knn_graph(&pts, k, Symmetry::Union, SpatialWeight::Uniform).unwrap();
                 for (i, truth) in want.iter().enumerate() {
                     let neigh: HashSet<usize> = g.neighbors(i).map(|(u, _)| u).collect();
@@ -659,7 +645,7 @@ mod tests {
                         );
                     }
                 }
-                // And every union edge must be justified by one side's true k-nearest.
+                // every union edge must be justified by one side's true k-nearest
                 for (i, truth) in want.iter().enumerate() {
                     for (u, _) in g.neighbors(i) {
                         assert!(
@@ -672,7 +658,7 @@ mod tests {
         }
     }
 
-    /// Xenium-scale: a few hundred thousand cells over a tissue section.
+    /// Xenium scale: a few hundred thousand cells over a section.
     ///
     /// ```text
     /// cargo test --release --no-default-features xenium_scale -- --ignored --nocapture
@@ -682,7 +668,7 @@ mod tests {
     fn xenium_scale() {
         let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(1);
         let n = 500_000;
-        // ~12 mm square at roughly Xenium cell density.
+        // ~12 mm square at roughly Xenium density
         let pts: Vec<[f64; 2]> = (0..n)
             .map(|_| {
                 [
@@ -736,7 +722,7 @@ mod tests {
         assert_eq!(g.node_count(), 1);
         assert_eq!(g.edge_count(), 0);
 
-        // Nothing within the radius.
+        // nothing within the radius
         let far = vec![[0.0, 0.0], [1000.0, 0.0]];
         let g = radius_graph(&far, 1.0, SpatialWeight::Uniform, None).unwrap();
         assert_eq!(g.edge_count(), 0);

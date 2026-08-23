@@ -1,13 +1,11 @@
 //! Uniform-grid spatial index.
 //!
-//! Tissue is close to uniformly dense, so bucketing points into fixed cells beats a tree:
-//! queries are O(points nearby) with no traversal, duplicates and collinear runs are ordinary
-//! inputs rather than pathological ones, and there is nothing approximate anywhere.
+//! Tissue is close to uniformly dense, so fixed cells beat a tree: queries are O(points
+//! nearby), duplicates and collinear runs are ordinary inputs, and nothing is approximate.
 //!
-//! It also replaces a dependency that turned out to be wrong. `kiddo` 5.2.2's `KdTree` panics
-//! once more than 32 points share a coordinate on one axis — which every Visium row does —
-//! and its `ImmutableKdTree` returns neighbour *ids* that do not match the coordinates it
-//! measured, so a graph built from it joins each cell to someone else's neighbours.
+//! It also replaces `kiddo` 5.2.2, which was wrong here. Its `KdTree` panics once more than
+//! 32 points share an axis value — every Visium row does — and its `ImmutableKdTree` returns
+//! ids that don't match the coordinates it measured.
 
 /// Points bucketed into cells of a fixed size, stored CSR-style.
 pub(crate) struct Grid<const D: usize> {
@@ -20,10 +18,8 @@ pub(crate) struct Grid<const D: usize> {
 }
 
 impl<const D: usize> Grid<D> {
-    /// Buckets `points` into cells of roughly `target_cell`.
-    ///
-    /// The cell size is enlarged if it would need more cells than points, so a handful of
-    /// far-flung outliers cannot make the index enormous.
+    /// Buckets `points` into cells of roughly `target_cell`, enlarging if that would need
+    /// more cells than points.
     pub(crate) fn new(points: &[[f64; D]], target_cell: f64) -> Self {
         debug_assert!(!points.is_empty());
         let mut min = [f64::INFINITY; D];
@@ -35,8 +31,7 @@ impl<const D: usize> Grid<D> {
             }
         }
 
-        // Cap total cells at ~2 per point: sparse data gets coarser cells rather than a
-        // gigantic mostly-empty index.
+        // ~2 cells per point max, so sparse data gets coarser cells not a huge empty index
         let mut cell = target_cell.max(f64::MIN_POSITIVE);
         let mut dims = [0usize; D];
         loop {
@@ -116,18 +111,18 @@ impl<const D: usize> Grid<D> {
             .fold(0usize, |r, (&c, &dim)| r.max(c).max(dim - 1 - c))
     }
 
-    /// Calls `f` for every point in a cell at Chebyshev distance exactly `ring` from `centre`.
+    /// Calls `f` for every point at Chebyshev distance exactly `ring` from `centre`.
     ///
-    /// Walking one ring at a time is what lets a k-nearest search stop as soon as its current
-    /// k-th distance is provably better than anything left unvisited.
+    /// One ring at a time, so a kNN search can stop once its k-th distance beats everything
+    /// left unvisited.
     pub(crate) fn for_each_in_ring(
         &self,
         centre: &[usize; D],
         ring: usize,
         mut f: impl FnMut(u32),
     ) {
-        // Clamp each axis to the grid, then walk the box with an odometer, skipping the
-        // interior — those cells belong to a smaller ring and were visited already.
+        // clamp to the grid, then odometer over the box, skipping the interior (already
+        // visited as a smaller ring)
         let mut lo = [0usize; D];
         let mut hi = [0usize; D];
         for d in 0..D {
@@ -152,7 +147,7 @@ impl<const D: usize> Grid<D> {
                 }
             }
 
-            // Odometer step over the clamped box.
+            // odometer step
             let mut d = D;
             loop {
                 if d == 0 {

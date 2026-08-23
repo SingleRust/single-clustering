@@ -1,23 +1,14 @@
 //! BANKSY-style feature augmentation.
 //!
-//! Turns spatial domain detection into ordinary clustering: augment each cell's expression
-//! with a summary of its neighbourhood, then run Leiden on the result exactly as you would
-//! without coordinates. Nothing here knows about clustering.
+//! Augments each cell's expression with a summary of its neighbourhood, so ordinary Leiden
+//! finds spatial domains. Nothing here knows about clustering.
 //!
-//! Every formula below was read from the reference implementation (`banksy-py`,
-//! `banksy/main.py` and `banksy/embed_banksy.py`), not from the paper, and is pinned by
-//! differential fixtures in `tests/fixtures/banksy_reference.json`. Two details are easy to
-//! get wrong from the paper alone:
+//! Formulas come from `banksy-py` (`main.py`, `embed_banksy.py`) rather than the paper, and
+//! are pinned by fixtures in `tests/fixtures/banksy_reference.json`. Two things the paper
+//! doesn't make obvious: the λ budget halves with each harmonic rather than splitting evenly
+//! ([`scale_factors`]), and every block is z-scored per column before scaling.
 //!
-//! * The λ budget is **not** split evenly across harmonics. Each successive harmonic gets
-//!   half the weight of the previous one, so at `max_m = 1` the mean takes ⅔ of λ and the
-//!   gradient ⅓ — see [`scale_factors`].
-//! * Every block is **z-scored per column before scaling**, so λ mixes standardised blocks
-//!   rather than raw ones. Without that, a block with larger variance dominates regardless
-//!   of λ.
-//!
-//! The weight matrix is row-normalised, hence asymmetric, so it is a
-//! [`NeighbourhoodOperator`] rather than a [`CSRNetwork`](crate::network::CSRNetwork).
+//! The weight matrix is row-normalised and so asymmetric — an operator, not a graph.
 
 use rayon::prelude::*;
 
@@ -33,19 +24,16 @@ pub enum Decay {
     Reciprocal,
     /// `1 / r²`.
     ReciprocalSquared,
-    /// `exp(-(r / median_r)²)`, where `median_r` is the median neighbour distance **for that
-    /// cell**. Scale-free per cell, which is why it is the reference default.
+    /// `exp(-(r / median_r)²)`, `median_r` per cell. Scale-free, and the reference default.
     #[default]
     ScaledGaussian,
-    /// `exp(-((rank + 1) · 1.5 / k)²)`, assigned in order of distance. Ignores the distances
-    /// themselves, so it is unaffected by local density.
+    /// `exp(-((rank + 1) · 1.5 / k)²)` by distance rank. Ignores distances, so density-free.
     Ranked,
 }
 
 /// Row-normalised directed neighbour weights.
 ///
-/// Not a graph: row normalisation makes it asymmetric, so `w[i][j] != w[j][i]`. It is an
-/// operator applied to a feature matrix.
+/// Not a graph — normalisation makes it asymmetric. An operator applied to a feature matrix.
 pub struct NeighbourhoodOperator {
     node_ptrs: Vec<usize>,
     neighbours: Vec<u32>,
@@ -61,19 +49,15 @@ pub struct NeighbourhoodOperator {
 impl NeighbourhoodOperator {
     /// Builds the operator for harmonic `m` over `k` nearest neighbours.
     ///
-    /// `k` is explicit per harmonic rather than derived from `m`, because the two references
-    /// disagree: R takes a `k_geom` vector and uses `k_geom[m]` (both 18 for DLPFC), while
-    /// Python silently multiplies, `num_neighbours * (m + 1)`, so the same nominal settings
-    /// give the gradient twice the neighbourhood. R produced the published DLPFC numbers, so
-    /// its convention is the one exposed here — pass `k * (m + 1)` yourself to reproduce
-    /// Python.
+    /// `k` is explicit per harmonic because the references disagree: R uses `k_geom[m]`,
+    /// Python silently uses `k * (m + 1)`. R produced the published DLPFC numbers, so that's
+    /// the convention here — pass `k * (m + 1)` yourself to match Python.
     ///
-    /// Excludes the cell itself — its own expression enters the augmented matrix as its own
-    /// block, not through the neighbourhood.
+    /// Excludes the cell itself; its own expression is a separate block.
     ///
     /// # Errors
     ///
-    /// If `k` is zero or a coordinate is not finite.
+    /// If `k` is zero or a coordinate isn't finite.
     pub fn for_harmonic(coords: &[[f64; 2]], k: usize, m: usize, decay: Decay) -> Result<Self> {
         Self::knn(coords, k, decay, m)
     }
@@ -106,8 +90,7 @@ impl NeighbourhoodOperator {
         let want = k.min(n.saturating_sub(1));
         let grid = Grid::new(coords, typical_spacing(coords, want.max(1)));
 
-        // Nearest `want` neighbours per cell, with distances, sorted by (distance, id) so
-        // ties never depend on visit order.
+        // sorted by (distance, id) so ties don't depend on visit order
         let found: Vec<Vec<(u32, f64)>> = coords
             .par_iter()
             .enumerate()
@@ -153,8 +136,8 @@ impl NeighbourhoodOperator {
             let distances: Vec<f64> = row.iter().map(|&(_, d2)| d2.sqrt()).collect();
             let mut w = decay_weights(&distances, decay);
 
-            // Row-normalise. Done *before* any phase factor, matching the reference: the
-            // magnitudes sum to 1, the complex weights do not.
+            // before any phase factor, like the reference: magnitudes sum to 1, the
+            // complex weights don't
             let sum: f64 = w.iter().sum();
             if sum > 0.0 {
                 for x in &mut w {
@@ -193,18 +176,15 @@ impl NeighbourhoodOperator {
         self.m
     }
 
-    /// Applies this operator's harmonic to a feature matrix.
+    /// Applies this operator's harmonic to a row-major `n_cells × n_features` matrix.
     ///
-    /// `m = 0` is the plain weighted neighbourhood mean. For `m >= 1` the weights carry a
-    /// phase `exp(i·m·θ)`, and the result is the **magnitude** of the complex sum — large
-    /// where a gene varies systematically with direction, near zero where the neighbourhood
-    /// looks the same all round. That is the "gradient" term.
-    ///
-    /// `features` is row-major, `n_cells × n_features`.
+    /// `m = 0` is the weighted neighbourhood mean. For `m >= 1` weights carry a phase
+    /// `exp(i·m·θ)` and the result is the magnitude of the complex sum — large where a gene
+    /// varies with direction, near zero where the neighbourhood looks the same all round.
     ///
     /// # Errors
     ///
-    /// If `features` does not match the cell count.
+    /// If `features` doesn't match the cell count.
     pub fn apply(&self, features: &[f64], n_features: usize) -> Result<Vec<f64>> {
         let m = self.m;
         if n_features == 0 {
@@ -233,12 +213,9 @@ impl NeighbourhoodOperator {
                         }
                     }
                 } else {
-                    // Centre on this cell's neighbourhood before taking the phase sum.
-                    // Without it the result measures the neighbourhood's overall level as
-                    // well as its directional variation, because the phase sum
-                    // `sum_j w_ij e^{i m phi}` is generally non-zero, so subtracting a
-                    // constant is not a no-op. Easy to miss: it lives in the reference's
-                    // matrix builder, not in its weight construction.
+                    // centre on this cell's neighbourhood first. The phase sum is generally
+                    // non-zero, so skipping this mixes in the overall level. Lives in the
+                    // reference's matrix builder, not its weight construction.
                     let mut centre = vec![0.0f64; n_features];
                     for e in span.clone() {
                         let (w, j) = (self.weights[e], self.neighbours[e] as usize);
@@ -273,7 +250,7 @@ impl NeighbourhoodOperator {
     }
 }
 
-/// Unnormalised weights for one cell's neighbour distances.
+/// Unnormalised weights for one cell's neighbours.
 fn decay_weights(distances: &[f64], decay: Decay) -> Vec<f64> {
     match decay {
         Decay::Uniform => vec![1.0; distances.len()],
@@ -282,7 +259,7 @@ fn decay_weights(distances: &[f64], decay: Decay) -> Vec<f64> {
         Decay::ScaledGaussian => {
             let mut sorted = distances.to_vec();
             sorted.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
-            // numpy's median: mean of the middle two on even counts.
+            // numpy's median: mean of the middle two on even counts
             let n = sorted.len();
             let median = if n == 0 {
                 0.0
@@ -298,7 +275,7 @@ fn decay_weights(distances: &[f64], decay: Decay) -> Vec<f64> {
         }
         Decay::Ranked => {
             let k = distances.len();
-            // Rank by distance, then assign a fixed decreasing profile in that order.
+            // rank by distance, then a fixed decreasing profile in that order
             let mut order: Vec<usize> = (0..k).collect();
             order.sort_unstable_by(|&a, &b| {
                 distances[a]
@@ -316,10 +293,9 @@ fn decay_weights(distances: &[f64], decay: Decay) -> Vec<f64> {
     }
 }
 
-/// Column z-scores, using the **population** variance `E[x²] − E[x]²`.
+/// Column z-scores on the population variance `E[x²] − E[x]²`.
 ///
-/// Not the sample variance — the reference divides by `n`, not `n − 1`, and a column with
-/// zero variance becomes zero rather than NaN.
+/// The reference divides by `n`, not `n − 1`. Zero-variance columns come out zero, not NaN.
 fn zscore_columns(matrix: &mut [f64], n_rows: usize, n_cols: usize) {
     if n_rows == 0 || n_cols == 0 {
         return;
@@ -344,11 +320,8 @@ fn zscore_columns(matrix: &mut [f64], n_rows: usize, n_cols: usize) {
 
 /// Block scale factors for `max_m` harmonics at neighbourhood contribution `lambda`.
 ///
-/// Returns `max_m + 2` factors: own expression first, then one per harmonic.
-///
-/// **Each harmonic gets half the weight of the one before it**, not an equal share. With
-/// `max_m = 1` that makes the mean ⅔ of λ and the gradient ⅓ — assuming an even split would
-/// over-weight the gradient by a factor of two.
+/// `max_m + 2` factors: own expression first, then one per harmonic. Each harmonic gets half
+/// the weight of the one before, so at `max_m = 1` the mean takes ⅔ of λ and the gradient ⅓.
 pub fn scale_factors(max_m: usize, lambda: f64) -> Vec<f64> {
     let n_blocks = max_m + 1;
     let mut squared = vec![0.0f64; n_blocks + 1];
@@ -361,10 +334,10 @@ pub fn scale_factors(max_m: usize, lambda: f64) -> Vec<f64> {
     squared.iter().map(|&s| s.max(0.0).sqrt()).collect()
 }
 
-/// Assembles the augmented matrix from the own-expression block and the harmonic blocks.
+/// Assembles the augmented matrix from the own-expression and harmonic blocks.
 ///
-/// Each block is z-scored per column and then scaled, so λ mixes standardised blocks. The
-/// result is `n_cells × (n_features · (max_m + 2))`, row-major, ready to PCA and cluster.
+/// Blocks are z-scored per column then scaled, so λ mixes standardised blocks. Result is
+/// `n_cells × (n_features · (max_m + 2))`, row-major, ready to PCA and cluster.
 ///
 /// # Errors
 ///
@@ -421,13 +394,12 @@ pub fn banksy_matrix(
 
 /// One-call BANKSY augmentation.
 ///
-/// Builds the neighbourhood operator, applies harmonics `0..=max_m`, and assembles the
-/// augmented matrix. `lambda = 0.2` and `k = 18` are the reference's Visium settings for
-/// domain segmentation; `max_m = 1` includes the gradient term.
+/// `lambda = 0.2`, `k = 18` are the reference's Visium domain settings; `max_m = 1` adds the
+/// gradient term.
 ///
 /// # Errors
 ///
-/// If any argument is out of range or the feature matrix does not match the cell count.
+/// If an argument is out of range or the feature matrix doesn't match the cell count.
 pub fn banksy_augment(
     coords: &[[f64; 2]],
     features: &[f64],
@@ -445,7 +417,7 @@ pub fn banksy_augment(
     banksy_matrix(features, &harmonics, coords.len(), n_features, lambda)
 }
 
-/// A cell size that puts roughly `k` points in each grid cell.
+/// Cell size putting roughly `k` points per grid cell.
 fn typical_spacing(points: &[[f64; 2]], k: usize) -> f64 {
     let (mut min, mut max) = ([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]);
     for p in points {

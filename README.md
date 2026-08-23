@@ -1,7 +1,8 @@
 # single-clustering
 
-⚠️ **Development Status**: This library is under active development. APIs may change between
-versions; see the changelog for 0.7.0, which is a breaking rewrite of the Leiden core.
+⚠️ **Development Status**: Under active development, APIs may change between versions. 1.0
+drops the `NetworkGrouping` trait and trims `VectorGrouping` to what `aggregate` actually
+uses.
 
 A Rust library for community detection and graph clustering, focused on being correct,
 reproducible, and fast enough for single-cell-scale graphs.
@@ -195,14 +196,14 @@ graphs.
 
 ```toml
 [dependencies]
-single-clustering = "0.7"
+single-clustering = "1.0"
 ```
 
 The k-NN graph construction is behind the default-on `knn` feature. To build just the
-clustering core — useful in CI, or on targets where the HNSW stack does not compile:
+clustering core:
 
 ```toml
-single-clustering = { version = "0.7", default-features = false }
+single-clustering = { version = "1.0", default-features = false }
 ```
 
 Multi-threaded refinement is behind an off-by-default `parallel` feature. It is off because
@@ -210,7 +211,7 @@ local moving — the larger half of the work — is still sequential, so the gai
 rather than the several-x a fully parallel implementation would give:
 
 ```toml
-single-clustering = { version = "0.7", features = ["parallel"] }
+single-clustering = { version = "1.0", features = ["parallel"] }
 ```
 
 Results are byte-identical regardless of thread count; `tests/thread_invariance.rs` asserts it

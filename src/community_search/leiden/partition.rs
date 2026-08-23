@@ -1,13 +1,13 @@
 //! Partition state.
 //!
-//! [`Partition`] holds every aggregate the quality functions need — sizes, node weights,
-//! strengths, internal edge weights — updated in O(1) per move. Nothing here walks the graph
-//! or allocates per call, which is what keeps local moving at O(degree) rather than O(n).
+//! [`Partition`] holds every aggregate the quality functions need, updated in O(1) per move.
+//! Nothing here walks the graph or allocates per call, which is what keeps local moving at
+//! O(degree).
 //!
 //! A move is [`remove_node`](Partition::remove_node) then
-//! [`insert_node`](Partition::insert_node), not one operation. The node sits in no community
-//! in between, so scoring every candidate — its old community, an empty one, anything else —
-//! is the same calculation.
+//! [`insert_node`](Partition::insert_node), never one operation. The node sits in no community
+//! in between, so every candidate — old community, empty one, anything else — scores the same
+//! way.
 
 use rand::seq::SliceRandom;
 use rand_chacha::ChaCha8Rng;
@@ -15,20 +15,17 @@ use rand_chacha::ChaCha8Rng;
 use crate::network::CSRNetwork;
 use crate::network::grouping::VectorGrouping;
 
-/// Membership value for a node that has been removed from its community.
-///
-/// Visible in [`Partition::membership_raw`] while a move is in progress; never in a
-/// partition handed back to a caller.
+/// Membership value for a removed node. Visible via [`Partition::membership_raw`] mid-move,
+/// never in a partition handed back.
 pub const UNASSIGNED: u32 = u32::MAX;
 
 /// A partition of a graph's nodes into communities, with incrementally maintained aggregates.
 #[derive(Debug, Clone)]
 pub struct Partition {
-    /// Community of each node, or [`UNASSIGNED`] while a node is removed.
+    /// Community of each node, or [`UNASSIGNED`] mid-move.
     ///
-    /// `u32`, not `usize`: this is the hottest random access in the algorithm — every
-    /// neighbour of every visited node reads it — so halving the array halves that cache
-    /// footprint. Ids are bounded by the node count, which `CSRNetwork` caps at `u32::MAX`.
+    /// `u32` because this is the hottest random access in the algorithm — every neighbour of
+    /// every visited node reads it — and halving the array halves that cache footprint.
     membership: Vec<u32>,
     /// Number of nodes in each community.
     size: Vec<u32>,
@@ -36,13 +33,12 @@ pub struct Partition {
     weight: Vec<f64>,
     /// Sum of node strengths in each community. This is `K_c` in the RB null model.
     strength: Vec<f64>,
-    /// Internal edge weight of each community: edges with both endpoints inside, each
-    /// undirected edge counted once, self-loops counted once at full weight.
+    /// Internal edge weight per community, each undirected edge once, self-loops at full
+    /// weight.
     internal: Vec<f64>,
     /// Community slots that currently hold no nodes, available for reuse.
     free: Vec<usize>,
-    /// Total edge weight, each edge once. Kept here so quality functions don't need the graph,
-    /// and so it stays consistent across levels.
+    /// Total edge weight, each edge once. Here so quality functions don't need the graph.
     total_weight: f64,
     /// Sum of all node weights.
     total_node_weight: f64,
@@ -57,7 +53,7 @@ impl Partition {
             size: vec![1; n],
             weight: (0..n).map(|v| graph.node_weight(v)).collect(),
             strength: (0..n).map(|v| graph.strength(v)).collect(),
-            // only internal edge is its own self-loop
+            // its only internal edge is its own self-loop
             internal: (0..n).map(|v| graph.self_loop_weight(v)).collect(),
             free: Vec::new(),
             total_weight: graph.total_weight(),
@@ -67,8 +63,7 @@ impl Partition {
 
     /// Creates a partition from an explicit membership vector.
     ///
-    /// Ids need not be consecutive — empty slots below the maximum are recorded as free and
-    /// reused before anything new is allocated.
+    /// Ids needn't be consecutive; gaps become free slots and get reused first.
     pub fn from_membership(graph: &CSRNetwork, membership: &[usize]) -> Self {
         debug_assert_eq!(membership.len(), graph.node_count());
         let slots = membership.iter().copied().max().map_or(0, |m| m + 1);
@@ -94,7 +89,7 @@ impl Partition {
                 if membership[u] != c {
                     continue;
                 }
-                // each edge once: loops here, regular ones from the lower id
+                // each edge once: loops here, the rest from the lower id
                 if u == v || v < u {
                     p.internal[c] += w;
                 }
@@ -126,20 +121,20 @@ impl Partition {
         self.membership.len()
     }
 
-    /// Community of a node. Panics in debug builds if the node is currently removed.
+    /// Community of a node. Debug-panics if it's currently removed.
     #[inline]
     pub fn membership(&self, node: usize) -> usize {
         debug_assert_ne!(self.membership[node], UNASSIGNED, "node {node} is removed");
         self.membership[node] as usize
     }
 
-    /// The raw membership slice, which may contain [`UNASSIGNED`] mid-move.
+    /// Raw membership, which may hold [`UNASSIGNED`] mid-move.
     #[inline]
     pub fn membership_raw(&self) -> &[u32] {
         &self.membership
     }
 
-    /// The membership as `usize` values, allocated fresh.
+    /// Membership as `usize`, allocated fresh.
     pub fn membership_vec(&self) -> Vec<usize> {
         self.membership.iter().map(|&c| c as usize).collect()
     }
@@ -180,21 +175,19 @@ impl Partition {
         self.total_node_weight
     }
 
-    /// Returns a community id that is currently empty, without allocating.
+    /// An empty community id, without allocating.
     ///
-    /// Reuses a free slot if there is one, otherwise the next index, which
-    /// [`insert_node`](Self::insert_node) allocates on demand. Each caller takes exactly one
-    /// and fills it immediately, so two nodes can't get the same empty community.
+    /// A free slot if there is one, otherwise the next index, allocated on insert. Each caller
+    /// takes one and fills it immediately, so two nodes can't get the same one.
     #[inline]
     pub fn empty_community(&self) -> usize {
         self.free.last().copied().unwrap_or(self.size.len())
     }
 
-    /// Removes a node from its community, updating all aggregates in O(1).
+    /// Removes a node from its community, updating aggregates in O(1). Returns the community
+    /// it was in.
     ///
-    /// `weight_to_own` is the total weight of edges from `node` to other members of its
-    /// community, **excluding** the node's self-loop — exactly what
-    /// [`NeighborWeights`] accumulates. Returns the community the node was in.
+    /// `weight_to_own` excludes the self-loop — exactly what [`NeighborWeights`] accumulates.
     pub fn remove_node(&mut self, node: usize, graph: &CSRNetwork, weight_to_own: f64) -> usize {
         let c = self.membership[node] as usize;
         debug_assert_ne!(
@@ -205,11 +198,11 @@ impl Partition {
         self.size[c] -= 1;
         self.weight[c] -= graph.node_weight(node);
         self.strength[c] -= graph.strength(node);
-        // its edges in, plus its self-loop, stop being internal
+        // its edges in, plus its self-loop, stop counting as internal
         self.internal[c] -= weight_to_own + graph.self_loop_weight(node);
 
         if self.size[c] == 0 {
-            // clamp drift so empty is exactly empty
+            // clamp float drift so empty is exactly empty
             self.weight[c] = 0.0;
             self.strength[c] = 0.0;
             self.internal[c] = 0.0;
@@ -220,10 +213,10 @@ impl Partition {
         c
     }
 
-    /// Inserts a removed node into a community, updating all aggregates in O(1).
+    /// Inserts a removed node into a community, updating aggregates in O(1).
     ///
-    /// `community` may be [`empty_community`](Self::empty_community), in which case a new
-    /// slot is allocated. `weight_to_comm` excludes the node's self-loop.
+    /// `community` may be [`empty_community`](Self::empty_community), which allocates a slot.
+    /// `weight_to_comm` excludes the self-loop.
     pub fn insert_node(
         &mut self,
         node: usize,
@@ -256,9 +249,8 @@ impl Partition {
         self.membership[node] = community as u32;
     }
 
-    /// Renumbers communities consecutively from 0, keeping their relative order.
-    ///
-    /// Ascending order, so the output never depends on iteration order upstream.
+    /// Renumbers communities consecutively from 0, ascending, so the output never depends on
+    /// iteration order upstream.
     pub fn renumber(&mut self) {
         let slots = self.size.len();
         let mut new_id = vec![usize::MAX; slots];
@@ -294,17 +286,14 @@ impl Partition {
 
     /// Renumbers this partition and returns its membership as a [`VectorGrouping`].
     ///
-    /// `&mut self` on purpose: the grouping's ids and this partition's must be the same
-    /// numbers, since callers use `membership(v)` to index the graph
-    /// [`CSRNetwork::aggregate`] produces. Renumbering a copy would let them drift silently.
+    /// `&mut self` on purpose: callers use `membership(v)` to index the graph
+    /// [`CSRNetwork::aggregate`] produces, so the two sets of ids have to stay the same.
     pub fn renumber_into_grouping(&mut self) -> VectorGrouping {
         self.renumber();
         VectorGrouping::from_assignments(&self.membership_vec())
     }
 
-    /// Recomputes every aggregate from scratch and checks it against the maintained value.
-    ///
-    /// Used by tests to prove the incremental updates never drift.
+    /// Recomputes every aggregate and checks it against the maintained one. Tests only.
     pub fn verify_against(&self, graph: &CSRNetwork) -> std::result::Result<(), String> {
         let rebuilt = Self::from_membership(graph, &self.membership_vec());
         for c in 0..self.size.len() {
@@ -329,38 +318,32 @@ impl Partition {
     }
 }
 
-/// Accumulates edge weight from one node to each neighbouring community.
-///
-/// Replaces the per-call `HashSet` and `get_group_members()` allocation that made the old
-/// implementation O(n) per candidate. One pass over a node's neighbours gives every candidate
-/// and its weight, so scoring all of them is O(degree), not O(n · degree).
-///
-/// Candidates come back in first-touch order, i.e. ascending neighbour id — deterministic,
-/// unlike hash-set iteration.
 #[derive(Debug, Clone, Copy, Default)]
 struct Slot {
-    /// Generation this slot was last written in, avoiding an O(slots) clear between nodes.
+    /// Generation last written, which is what avoids an O(slots) clear between nodes.
     stamp: u64,
-    /// Accumulated edge weight to this community, valid only when `stamp == generation`.
+    /// Edge weight to this community, valid only when `stamp == generation`.
     weight: f64,
 }
 
+/// Edge weight from one node to each neighbouring community.
+///
+/// One pass over a node's neighbours gives every candidate and its weight, so scoring all of
+/// them is O(degree). Candidates come back in first-touch order, i.e. ascending neighbour id.
 #[derive(Debug, Clone, Default)]
 pub struct NeighborWeights {
-    /// Stamp and weight packed together — the inner loop touches both for the same community,
-    /// and at scale this array is way past cache, so adjacency turns two random misses per
-    /// neighbour into one.
+    /// Stamp and weight packed together: the inner loop touches both for the same community,
+    /// and past cache that's one random miss per neighbour instead of two.
     ///
-    /// Tried and reverted: a linear-scan path for low-degree nodes. 19% worse at 100k (the
-    /// indexed array still fits in cache there) and only break-even at 3M, since the scan
-    /// trades a miss for a branch-mispredicting loop.
+    /// Tried and reverted: a linear scan for low-degree nodes. 19% worse at 100k, break-even
+    /// at 3M — it trades a miss for a branch-mispredicting loop.
     slots: Vec<Slot>,
     generation: u64,
     touched: Vec<usize>,
 }
 
 impl NeighborWeights {
-    /// Creates an accumulator sized for `slots` communities.
+    /// Sized for `slots` communities.
     pub fn with_capacity(slots: usize) -> Self {
         Self {
             slots: vec![Slot::default(); slots],
@@ -369,9 +352,7 @@ impl NeighborWeights {
         }
     }
 
-    /// Grows the accumulator so community ids up to `slots - 1` are addressable.
-    ///
-    /// Call this once per node, before [`collect`](Self::collect) - not once per neighbour.
+    /// Grows so ids up to `slots - 1` are addressable. Once per node, not per neighbour.
     #[inline]
     pub fn ensure_capacity(&mut self, slots: usize) {
         if self.slots.len() < slots {
@@ -379,10 +360,8 @@ impl NeighborWeights {
         }
     }
 
-    /// Starts a new accumulation round.
-    ///
-    /// A generation counter is what makes clearing free. `u64` won't wrap in any realistic
-    /// run, but the reset keeps that from being a silent correctness cliff.
+    /// Starts a new round. The generation counter makes clearing free; `u64` won't wrap in
+    /// any realistic run, but the reset keeps that from being a silent correctness cliff.
     #[inline]
     fn begin(&mut self) {
         self.touched.clear();
@@ -415,11 +394,9 @@ impl NeighborWeights {
         }
     }
 
-    /// Accumulates the weight from `node` to each community containing one of its neighbours.
-    ///
-    /// Self-loops are excluded, matching the convention of
-    /// [`Partition::remove_node`]/[`Partition::insert_node`], which add the self-loop
-    /// themselves. Returns the touched community ids.
+    /// Weight from `node` to each community holding one of its neighbours, self-loop
+    /// excluded — [`Partition::remove_node`]/[`insert_node`](Partition::insert_node) add that
+    /// themselves. Returns the touched ids.
     pub fn collect(&mut self, graph: &CSRNetwork, membership: &[u32], node: usize) -> &[usize] {
         self.begin();
 
@@ -436,7 +413,7 @@ impl NeighborWeights {
         &self.touched
     }
 
-    /// Weight from the last collected node to `community`, or `0.0` if untouched.
+    /// Weight from the last collected node to `community`, or `0.0`.
     #[inline]
     pub fn weight_to(&self, community: usize) -> f64 {
         match self.slots.get(community) {
@@ -445,18 +422,17 @@ impl NeighborWeights {
         }
     }
 
-    /// The communities touched by the last [`collect`](Self::collect).
+    /// Communities touched by the last [`collect`](Self::collect).
     #[inline]
     pub fn touched(&self) -> &[usize] {
         &self.touched
     }
 }
 
-/// Reusable working buffers for local moving and refinement.
+/// Reusable buffers for local moving and refinement.
 ///
-/// Both phases want a shuffled order, a work queue, and a queued-flag array, all sized to the
-/// node count. Per-call allocation is ~1.3 GB of churn per level at 75M nodes, so the driver
-/// owns one and hands it down.
+/// Both want a shuffled order, a queue, and a queued flag per node. Allocating per call is
+/// ~1.3 GB of churn per level at 75M nodes, so the driver owns one and hands it down.
 #[derive(Debug, Clone, Default)]
 pub struct MoveScratch {
     /// Per-node accumulator of edge weight to each neighbouring community.
@@ -467,7 +443,7 @@ pub struct MoveScratch {
 }
 
 impl MoveScratch {
-    /// Creates scratch sized for `n` nodes and `slots` communities.
+    /// Sized for `n` nodes and `slots` communities.
     pub fn with_capacity(n: usize, slots: usize) -> Self {
         Self {
             weights: NeighborWeights::with_capacity(slots),
@@ -477,7 +453,7 @@ impl MoveScratch {
         }
     }
 
-    /// Fills the queue with all `n` nodes in a freshly shuffled order and marks them queued.
+    /// Queues all `n` nodes in a fresh shuffled order.
     pub(crate) fn seed_queue(&mut self, n: usize, rng: &mut ChaCha8Rng) {
         self.order.clear();
         self.order.extend(0..n);
@@ -490,7 +466,7 @@ impl MoveScratch {
         self.queued.resize(n, true);
     }
 
-    /// Produces a freshly shuffled node order without touching the queue.
+    /// A fresh shuffled node order, leaving the queue alone.
     pub(crate) fn shuffled_order(&mut self, n: usize, rng: &mut ChaCha8Rng) -> &[usize] {
         self.order.clear();
         self.order.extend(0..n);

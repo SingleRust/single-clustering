@@ -1,10 +1,8 @@
 //! Local moving: the inner loop of Leiden.
 //!
-//! Take a node out of its community, put it wherever it scores best, repeat until nothing
-//! wants to move. Nodes come off a queue seeded with a shuffled order; a node that moves
-//! re-queues its neighbours, so only the affected part gets revisited.
-//!
-//! O(degree) per node, and nothing allocates per node or per candidate.
+//! Take a node out, put it wherever it scores best, repeat until nothing moves. Nodes come off
+//! a queue seeded with a shuffled order, and a node that moves re-queues its neighbours, so
+//! only the affected part gets revisited. O(degree) per node, no allocation per node.
 
 use rand_chacha::ChaCha8Rng;
 
@@ -12,28 +10,25 @@ use crate::community_search::leiden::objective::{InsertContext, Objective};
 use crate::community_search::leiden::partition::{MoveScratch, Partition};
 use crate::network::CSRNetwork;
 
-/// Improvement floor, as a fraction of total edge weight.
-///
-/// Relative, not absolute: otherwise scaling every weight by a constant could change the
-/// clustering, even though the objective itself is scale-invariant. Low enough to sit under
-/// any real gain, high enough that float dust doesn't cause no-op move cycles.
+/// Improvement floor as a fraction of total edge weight. Relative, so rescaling weights
+/// can't change the clustering; low enough to sit under any real gain, high enough that float
+/// dust doesn't cause no-op move cycles.
 pub(crate) const MIN_GAIN_RELATIVE: f64 = 1e-12;
 
-/// The absolute improvement threshold for a given graph.
+/// Absolute threshold for a given graph.
 #[inline]
 pub(crate) fn min_gain(partition: &Partition) -> f64 {
     MIN_GAIN_RELATIVE * partition.total_weight().abs().max(1.0)
 }
 
-/// Move cap, as a multiple of node count. Only a safety valve — this terminates on its own,
-/// since every accepted move strictly increases a bounded objective.
+/// Move cap per node. A safety valve only — every accepted move strictly increases a bounded
+/// objective, so this terminates anyway.
 const MAX_MOVES_PER_NODE: usize = 100;
 
-/// Moves nodes between communities until no single move improves the objective.
+/// Moves nodes until no single move improves the objective, returning the total gain.
 ///
-/// Returns the total quality improvement. `max_community_weight` caps a community's summed
-/// node weight; node weights add up when communities collapse, so it means the same thing at
-/// every level.
+/// `max_community_weight` caps a community's summed node weight. Node weights add up on
+/// collapse, so it means the same thing at every level.
 pub fn local_move(
     graph: &CSRNetwork,
     partition: &mut Partition,
@@ -55,7 +50,7 @@ pub fn local_move(
 
     while let Some(v) = scratch.pop() {
         let ctx = InsertContext::for_node(graph, v);
-        // hoisted out of the neighbour loop, ~15x fewer calls
+        // hoisted out of the neighbour loop: ~15x fewer calls
         scratch.weights.ensure_capacity(partition.slots() + 1);
         scratch
             .weights
@@ -65,7 +60,7 @@ pub fn local_move(
         let weight_to_old = scratch.weights.weight_to(old);
         partition.remove_node(v, graph, weight_to_old);
 
-        // staying put is just another candidate — keeps the empty case uniform
+        // staying put is just another candidate, which keeps the empty case uniform
         let base_gain = objective.delta_insert(partition, &ctx, old, weight_to_old);
         let mut best = old;
         let mut best_gain = base_gain;
@@ -86,7 +81,7 @@ pub fn local_move(
             }
         }
 
-        // one per node, claimed below, so no two get the same
+        // one per node, claimed below, so no two nodes get the same
         let empty = partition.empty_community();
         if empty != old && fits(partition, empty) {
             let gain = objective.delta_insert(partition, &ctx, empty, 0.0);

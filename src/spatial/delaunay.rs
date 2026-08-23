@@ -1,45 +1,11 @@
 //! Delaunay neighbour graphs.
 //!
-//! Parameter-free: no radius, no `k`. Each cell is joined to the ones it actually borders,
-//! and the triangulation adapts to local density on its own — dense regions get short edges,
-//! sparse regions long ones, with no threshold to tune. Average degree is just under 6, since
-//! a triangulation of `n` points with `h` on the convex hull has exactly `3n - 3 - h` edges.
+//! No radius, no `k` — each cell joins the ones it borders, and the triangulation adapts to
+//! local density on its own. Mean degree is just under 6: a triangulation of `n` points with
+//! `h` on the hull has exactly `3n - 3 - h` edges.
 //!
-//! # Why pruning is still needed
-//!
-//! A triangulation covers the *convex hull* of the points, so it invents edges wherever the
-//! tissue is not convex: across ventricles and vessels, around concave boundaries, and
-//! between physically separate fragments on the same section. Those edges are long, and
-//! joining two sides of a hole is exactly the kind of error that produces a plausible-looking
-//! but meaningless domain.
-//!
-//! Note that the parameter-free subgraphs — Gabriel, relative-neighbourhood — do **not** fix
-//! this. Their tests ask whether other points lie near the edge, and the whole point of a
-//! hole is that nothing does, so a hole-spanning edge passes. Measured on two detached
-//! fragments, Gabriel leaves 19 of 42 bridges standing and drops 21% of genuine edges
-//! elsewhere; the relative-neighbourhood graph drops 52%. Removing an artefact edge needs a
-//! rule about length. See [`HullPruning`].
-//!
-//! They may still be worth adding as an option one day — MST ⊆ RNG ⊆ GG ⊆ Delaunay, both are
-//! always connected, and Lingas (1994) extracts either from an existing triangulation in
-//! O(n), so they are nearly free once the Delaunay exists. Two things to get right if so:
-//! use the **open** exclusion region, since the closed variant disconnects on ties and
-//! gridded coordinates are made of ties; and expect mean degree ~4 for Gabriel and ~2.56 for
-//! RNG against Delaunay's 6.
-//!
-//! # What other tools do
-//!
-//! Worth knowing, because the defaults differ sharply:
-//!
-//! * **squidpy** applies no pruning at all — `delaunay=True` returns the raw triangulation,
-//!   convex hull included. Its `radius` and `percentile` filters both default to off, and in
-//!   1.6.x a scalar `radius` is *silently ignored* on the Delaunay path.
-//! * **Giotto** is the only one that derives a cutoff automatically, using a global Tukey
-//!   whisker over all edge lengths. Being global, it fails exactly where tissue density
-//!   varies: on a dense block beside 24x sparser stroma it shatters the sparse side into
-//!   ~570 components while barely touching the dense one.
-//!
-//! That is the case for a local rule, and why [`HullPruning::Adaptive`] is the default here.
+//! Pruning is still needed, because a triangulation covers the convex hull and so invents
+//! edges across holes and between separate fragments. See `docs/spatial-graphs.md`.
 
 use crate::error::{ClusteringError, Result};
 use crate::network::{CSRNetwork, MAX_NODES};
@@ -48,45 +14,23 @@ use crate::spatial::points::SpatialWeight;
 /// How to drop the edges a triangulation invents across empty space.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum HullPruning {
-    /// Keep the whole triangulation. Correct only when the tissue really is convex and
-    /// gap-free, which is rare.
+    /// Keep everything. Only right when the tissue is convex and gap-free, which is rare.
     None,
-    /// Drop edges longer than this, in coordinate units. Use when the tissue has a known
-    /// scale and roughly uniform density.
+    /// Drop edges longer than this, in coordinate units. Wants a known scale and roughly
+    /// uniform density.
     MaxDistance(f64),
-    /// Drop the longest `fraction` of all edges.
-    ///
-    /// One global cutoff, so it over-prunes sparse regions and under-prunes dense ones
-    /// whenever density varies — which in tissue it always does.
+    /// Drop the longest `fraction` of all edges. One global cutoff, so it over-prunes sparse
+    /// regions and under-prunes dense ones wherever density varies.
     Percentile {
         /// Share of edges to drop, in `[0, 1)`.
         fraction: f64,
     },
-    /// Drop an edge longer than `factor` times the local edge scale at **both** its
-    /// endpoints, where local scale is a low quantile of a node's incident edge lengths.
+    /// Drop an edge longer than `factor` times the local edge scale at **both** endpoints.
     ///
-    /// Compares against `max` of the two scales rather than `min`, so an edge that is long
-    /// only because one end sits in sparse tissue survives — a real boundary between a dense
-    /// nest and loose stroma should stay connected. A hole-spanning edge is long relative to
-    /// both ends and goes.
-    ///
-    /// The default of 2.0 is measured, by `calibrate_adaptive_factor`: it is the largest
-    /// factor that fully separates two detached tissue fragments, which is the one
-    /// unambiguous requirement — separate pieces must never be joined. It costs about 5% of
-    /// edges on uniform-random points, and less on real tissue, whose cells pack more
-    /// regularly than a Poisson process.
-    ///
-    /// It also happens to be the canonical value. Zahn's 1971 inconsistent-edge criterion is
-    /// this same shape — an edge "significantly larger than the average of nearby edge
-    /// weights on **both sides** of the edge" — and he reports that "a factor of 2 usually
-    /// means the separation is quite apparent", with worked examples spanning 1.3 to 2.6.
-    ///
-    /// Two things it will not do. It cannot clear a hole only two or three cells across:
-    /// that needs a factor near 1.5, which drops ~16% of genuine edges everywhere, and at
-    /// that width it is arguable whether the cells either side are neighbours at all. And,
-    /// as Zahn notes of the same criterion, it "doesn't detect one-way gradients however
-    /// steep" — a tissue whose density ramps smoothly across the section has no local
-    /// discontinuity for the rule to find.
+    /// Compares against the larger of the two scales, so an edge that's long only because one
+    /// end sits in sparse tissue survives. A hole-spanning edge is long at both ends and goes.
+    /// The default 2.0 is measured by `calibrate_adaptive_factor`; see
+    /// `docs/spatial-graphs.md`.
     Adaptive {
         /// Multiple of the local scale above which an edge is dropped.
         factor: f64,
@@ -124,15 +68,13 @@ impl HullPruning {
 
 /// Builds a Delaunay neighbour graph from 2D coordinates.
 ///
-/// 2D only — the 3D equivalent is a tetrahedralisation, which is a different algorithm and a
-/// much heavier dependency. For 3D use [`radius_graph`](super::radius_graph) or
-/// [`knn_graph`](super::knn_graph).
+/// 2D only. For 3D use [`radius_graph`](super::radius_graph) or [`knn_graph`](super::knn_graph).
 ///
 /// # Errors
 ///
-/// If the points are degenerate (all collinear, or fewer than three distinct positions), so
-/// no triangulation exists. That is reported rather than returning an empty graph, since an
-/// edgeless graph would cluster into singletons and look like a result.
+/// Degenerate points (all collinear, or fewer than three distinct positions) have no
+/// triangulation. That's an error rather than an empty graph, which would cluster into
+/// singletons and look like a result.
 pub fn delaunay_graph(
     points: &[[f64; 2]],
     pruning: HullPruning,
@@ -156,7 +98,7 @@ pub fn delaunay_graph(
     if n < 2 {
         return CSRNetwork::from_csr_parts(vec![0; n + 1], Vec::new(), Vec::new(), None);
     }
-    // Two points have no triangle but do border each other.
+    // two points make no triangle but do border each other
     if n == 2 {
         let d2 = distance_sq(points[0], points[1]);
         return build(n, &[(0, 1, d2)], weight);
@@ -171,8 +113,7 @@ pub fn delaunay_graph(
         return Err(ClusteringError::DegenerateTriangulation { n_points: n });
     }
 
-    // Each triangle contributes three edges; neighbouring triangles share them, so collect
-    // into a set keyed on the ordered pair.
+    // neighbouring triangles share edges, so dedup on the ordered pair
     let mut edges: Vec<(u32, u32, f64)> = Vec::with_capacity(tri.triangles.len());
     for t in tri.triangles.chunks_exact(3) {
         for &(a, b) in &[(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
@@ -220,7 +161,7 @@ fn prune(edges: &[(u32, u32, f64)], n: usize, pruning: HullPruning) -> Vec<(u32,
                 .iter()
                 .copied()
                 .filter(|&(a, b, d2)| {
-                    // Squared throughout, so the factor is squared too.
+                    // squared throughout, so the factor is too
                     let s = scale[a as usize].max(scale[b as usize]);
                     d2 <= f2 * s
                 })
@@ -229,16 +170,13 @@ fn prune(edges: &[(u32, u32, f64)], n: usize, pruning: HullPruning) -> Vec<(u32,
     }
 }
 
-/// Quantile of incident edge length used as a node's local spacing.
+/// Quantile of incident edge length taken as a node's local spacing.
 ///
-/// Deliberately below the median. A node on the rim of a hole has several long edges reaching
-/// across it, and those drag its median up until the spurious edges look normal — the median
-/// hides exactly what we are trying to find. A lower quantile reads the genuine local
-/// spacing, since at least a quarter of any node's edges go to real neighbours.
+/// Below the median on purpose: a rim node's long edges drag its median up until the spurious
+/// ones look normal. A quarter of any node's edges go to real neighbours.
 const SCALE_QUANTILE: f64 = 0.25;
 
-/// Squared local length scale per node. One small sort each, since Delaunay degree averages
-/// just under 6.
+/// Squared local length scale per node. One small sort each — degree averages under 6.
 fn local_scale(edges: &[(u32, u32, f64)], n: usize) -> Vec<f64> {
     let mut incident: Vec<Vec<f64>> = vec![Vec::new(); n];
     for &(a, b, d2) in edges {
@@ -258,7 +196,7 @@ fn local_scale(edges: &[(u32, u32, f64)], n: usize) -> Vec<f64> {
         .collect()
 }
 
-/// Turns an undirected edge list into a symmetric graph.
+/// Undirected edge list to symmetric CSR.
 fn build(n: usize, edges: &[(u32, u32, f64)], weight: SpatialWeight) -> Result<CSRNetwork> {
     let mut degree = vec![0u32; n];
     for &(a, b, _) in edges {
@@ -302,7 +240,7 @@ mod tests {
             .collect()
     }
 
-    /// A square of tissue with a circular hole punched out of the middle.
+    /// Square of tissue with a hole punched in the middle.
     fn tissue_with_hole(seed: u64) -> (Vec<[f64; 2]>, [f64; 2], f64) {
         tissue_with_hole_radius(seed, 15.0)
     }
@@ -319,7 +257,7 @@ mod tests {
         (pts, centre, hole)
     }
 
-    /// Tissue in two pieces with a gap between, as a torn or folded section gives.
+    /// Two pieces with a gap, as a torn or folded section gives.
     fn two_fragments(seed: u64) -> Vec<[f64; 2]> {
         let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
         (0..2000)
@@ -330,7 +268,7 @@ mod tests {
             .collect()
     }
 
-    /// Does the segment a-b pass through the disc?
+    /// Does segment a-b pass through the disc?
     fn crosses(a: [f64; 2], b: [f64; 2], centre: [f64; 2], r: f64) -> bool {
         let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
         let len2 = dx * dx + dy * dy;
@@ -352,8 +290,7 @@ mod tests {
         out
     }
 
-    /// Euler's formula: a Delaunay triangulation of `n` points with `h` on the convex hull
-    /// has exactly `3n - 3 - h` edges. Nothing approximate about it.
+    /// Euler: `n` points with `h` on the hull give exactly `3n - 3 - h` edges.
     #[test]
     fn unpruned_edge_count_matches_eulers_formula() {
         for (n, seed) in [(50usize, 1u64), (500, 2), (2000, 3)] {
@@ -367,13 +304,13 @@ mod tests {
             let h = delaunator::triangulate(&coords).hull.len();
 
             assert_eq!(g.edge_count(), 3 * n - 3 - h, "n={n}, hull={h}");
-            // Which puts average degree just under 6.
+            // average degree just under 6
             let avg = 2.0 * g.edge_count() as f64 / n as f64;
             assert!(avg < 6.0 && avg > 5.0, "average degree {avg} at n={n}");
         }
     }
 
-    /// The reason pruning exists: a triangulation spans holes, and the default must not.
+    /// Why pruning exists: a triangulation spans holes, the default must not.
     #[test]
     fn adaptive_pruning_clears_a_tissue_hole() {
         let (pts, centre, hole) = tissue_with_hole(7);
@@ -395,9 +332,8 @@ mod tests {
             "the hole should be bridged before pruning: {before}"
         );
         assert_eq!(after, 0, "{after} edges still cross the hole");
-        // And it must not gut the rest of the graph. The default costs ~5% on uniform-random
-        // points, which are less regularly packed than real cells, so this is the pessimistic
-        // end of the range.
+        // and it must not gut the rest. ~5% on uniform-random points, which pack less
+        // regularly than real cells, so this is the pessimistic end.
         assert!(
             pruned.edge_count() as f64 > 0.92 * raw.edge_count() as f64,
             "pruning removed {} of {} edges",
@@ -406,8 +342,8 @@ mod tests {
         );
     }
 
-    /// Why the rule compares against `max` of the two local scales, not `min`: a genuine
-    /// boundary between dense and sparse tissue has to survive.
+    /// Why the rule uses `max` of the two scales, not `min`: a real dense/sparse boundary
+    /// has to survive.
     #[test]
     fn adaptive_pruning_keeps_a_dense_to_sparse_boundary() {
         let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(5);
@@ -434,8 +370,7 @@ mod tests {
         );
     }
 
-    /// Sweeps the one tuned constant across every artefact it has to remove and everything it
-    /// must not, over several seeds, so the default is a measurement rather than a guess.
+    /// Sweeps the one tuned constant over several seeds, so the default is measured.
     ///
     /// A large hole is easy and tells you little. The discriminating cases are a
     /// capillary-scale hole a few cell spacings across, and two separated fragments.

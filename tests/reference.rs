@@ -1,21 +1,16 @@
 //! Differential tests against `leidenalg`.
 //!
-//! Fixtures are generated once by `tools/gen_fixtures.py` and committed, so this needs no
-//! Python. Two separate things, which fail for different reasons:
-//!
-//! 1. **Definition** — on the *same membership*, our objective must give exactly
-//!    `leidenalg`'s value (up to the documented factor of 2). Pins the quality functions, and
-//!    would have caught the 2x resolution bug.
-//! 2. **Optimization** — our algorithm must reach a partition at least as good as theirs.
-//!    Checked on quality and agreement, never exact labels — different RNGs, so identical
-//!    partitions aren't an achievable bar.
+//! Fixtures come from `tools/gen_fixtures.py` and are committed, so this needs no Python. Two
+//! separate things: on the same membership our objective must give exactly `leidenalg`'s
+//! value, and our algorithm must reach a partition at least as good as theirs. The second is
+//! checked on quality and agreement, never exact labels — different RNGs.
 
 use single_clustering::community_search::leiden::{
     Cpm, LeidenConfig, Objective, ObjectiveKind, Partition, Rb, leiden, modularity,
 };
 use single_clustering::network::CSRNetwork;
 
-/// `leidenalg` multiplies its quality by `(2 - is_directed)`; ours omits that factor.
+/// `leidenalg` multiplies quality by `(2 - is_directed)`; we don't.
 const LEIDENALG_SCALE: f64 = 2.0;
 
 struct Case {
@@ -125,7 +120,7 @@ fn nmi(a: &[usize], b: &[usize]) -> f64 {
     }
 }
 
-/// Runs our algorithm with `n_iterations = 5`, matching how the fixtures were generated.
+/// `n_iterations = 5`, matching how the fixtures were generated.
 fn run(case: &Case, seed: u64) -> Vec<usize> {
     let config = LeidenConfig {
         objective: case.objective,
@@ -136,9 +131,8 @@ fn run(case: &Case, seed: u64) -> Vec<usize> {
     leiden(&case.graph, &config).unwrap().into_labels()
 }
 
-/// Best of `seeds` runs. Both are stochastic heuristics over the same landscape —
-/// `leidenalg`'s own two fixture seeds differ by up to 3.5% on the hard instances, so one run
-/// of ours against whichever run it recorded is noise.
+/// Best of `seeds` runs. `leidenalg`'s own two fixture seeds differ by up to 3.5% on the hard
+/// instances, so a single-run comparison is noise.
 fn run_best(case: &Case, seeds: u64) -> Vec<usize> {
     (0..seeds)
         .map(|s| run(case, 42 + s))
@@ -156,10 +150,8 @@ fn fixtures_are_present() {
     assert!(cases.len() >= 100, "only {} cases loaded", cases.len());
 }
 
-/// Our quality function must agree with `leidenalg`'s exactly, on the same membership.
-///
-/// Pins the definitions — fails if a resolution is scaled wrong or a constant convention
-/// drifts, no matter how good either optimizer is.
+/// Our quality function must match `leidenalg`'s exactly on the same membership. Pins the
+/// definitions regardless of how good either optimizer is.
 #[test]
 fn quality_definitions_match_leidenalg() {
     let mut failures = Vec::new();
@@ -181,12 +173,10 @@ fn quality_definitions_match_leidenalg() {
     );
 }
 
-/// Our modularity must agree with igraph's on the same membership.
+/// Our modularity must match igraph's on the same membership.
 ///
-/// To `1e-7`, not to the last bit: adjacency is stored as `f32`, so a weight like `0.2531`
-/// from the fixtures is rounded on the way in. Modularity is bounded by 1, and f32 epsilon is
-/// 1.2e-7, so that is the best agreement the storage can support. The arithmetic itself is
-/// f64 throughout.
+/// To `1e-7`, not the last bit: adjacency is stored as `f32`, so fixture weights round on the
+/// way in, and f32 epsilon is 1.2e-7. The arithmetic itself is f64.
 #[test]
 fn modularity_matches_igraph() {
     let mut failures = Vec::new();
@@ -210,12 +200,9 @@ fn modularity_matches_igraph() {
 
 /// No single case may fall grossly short of `leidenalg`.
 ///
-/// The bound is deliberately loose — its job is to catch a systematic defect, like a
-/// misscaled resolution, not to police heuristic noise. Aggregate parity is checked by
-/// [`optimizer_is_not_systematically_worse`], which is the tight test.
-///
-/// Known residual: high-resolution RB on the medium SBM sits ~6% below `leidenalg`, on an
-/// instance where `leidenalg`'s own two seeds differ by 3.5%.
+/// Loose on purpose — it catches a systematic defect, not heuristic noise.
+/// [`optimizer_is_not_systematically_worse`] is the tight one. Known residual: high-resolution
+/// RB on the medium SBM sits ~6% below, on an instance where their own seeds differ by 3.5%.
 #[test]
 fn no_case_falls_grossly_short() {
     let mut failures = Vec::new();
@@ -240,10 +227,8 @@ fn no_case_falls_grossly_short() {
     );
 }
 
-/// Across the whole fixture set, a single run of ours must be level with `leidenalg`.
-///
-/// At the time of writing this is -0.11%: 33 cases better, 107 equal, 20 worse. The bound
-/// leaves room for heuristic noise while still failing loudly on a real regression.
+/// Across the whole fixture set a single run must be level with `leidenalg`. Currently
+/// -0.11%: 33 better, 107 equal, 20 worse.
 #[test]
 fn optimizer_is_not_systematically_worse() {
     let cases = load_cases();
@@ -279,7 +264,7 @@ fn optimizer_is_not_systematically_worse() {
     );
 }
 
-/// Given the same budget `leidenalg` had, we should come out ahead on aggregate.
+/// Same budget as `leidenalg`, and we should come out ahead on aggregate.
 #[test]
 fn two_seeds_beat_leidenalg_on_aggregate() {
     let cases = load_cases();
@@ -310,13 +295,9 @@ fn two_seeds_beat_leidenalg_on_aggregate() {
     );
 }
 
-/// Where the answer is unambiguous, we find the *same* communities, not merely ones scoring
-/// as well.
-///
-/// Restricted on purpose. Agreement is only a meaningful signal when the instance has one
-/// clearly right answer: `sbm_hard` (p_in 0.18 vs p_out 0.07) and resolutions far from an
-/// instance's natural granularity admit many near-equal partitions, so two good optimizers
-/// legitimately disagree there. Quality, checked above, is the right measure for those.
+/// Where the answer is unambiguous, we find the *same* communities, not just ones scoring as
+/// well. Restricted on purpose: `sbm_hard` and off-granularity resolutions admit many
+/// near-equal partitions, where quality is the right measure instead.
 #[test]
 fn partitions_agree_where_structure_is_unambiguous() {
     let mut failures = Vec::new();
@@ -332,7 +313,7 @@ fn partitions_agree_where_structure_is_unambiguous() {
         if !strong_structure || !natural_resolution {
             continue;
         }
-        // Degenerate references make NMI uninformative.
+        // degenerate references make NMI uninformative
         if case.reference_n_clusters <= 1
             || case.reference_n_clusters >= case.reference_membership.len()
         {
@@ -361,8 +342,8 @@ fn partitions_agree_where_structure_is_unambiguous() {
     );
 }
 
-/// Cluster counts should track `leidenalg`'s. This is the user-visible consequence of the
-/// resolution parameter meaning the same thing in both libraries.
+/// Cluster counts should track `leidenalg`'s — the user-visible consequence of resolution
+/// meaning the same thing in both.
 #[test]
 fn cluster_counts_track_leidenalg() {
     let mut failures = Vec::new();
@@ -370,8 +351,7 @@ fn cluster_counts_track_leidenalg() {
         let labels = run_best(&case, 2);
         let ours = labels.iter().max().map_or(0, |m| m + 1);
         let theirs = case.reference_n_clusters;
-        // Allow a little slack for genuinely ambiguous granularity, but not a factor of two,
-        // which is exactly what the old resolution bug produced.
+        // slack for ambiguous granularity, but not the factor of two the old bug gave
         let tol = 2 + theirs / 5;
         if ours.abs_diff(theirs) > tol {
             failures.push(format!("{}: ours {ours}, leidenalg {theirs}", case.name));

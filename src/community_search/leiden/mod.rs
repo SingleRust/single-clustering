@@ -17,16 +17,13 @@
 //! # }
 //! ```
 //!
-//! # How it works
+//! Each level: [`local_move()`] settles nodes, [`refine()`] re-derives a finer partition
+//! inside each community, and [`CSRNetwork::aggregate`] collapses the **refined** communities.
+//! The next level starts from the coarse partition the working communities induce, so the same
+//! partition keeps improving until collapsing stops shrinking the graph.
 //!
-//! Each level: [`local_move()`] settles nodes into communities, [`refine()`] re-derives a
-//! finer partition inside each one, and [`CSRNetwork::aggregate`] collapses the **refined**
-//! communities into super-nodes. The next level starts from the coarse partition the working
-//! communities induce, so the same partition keeps improving at coarser granularity until
-//! collapsing stops shrinking the graph.
-//!
-//! Collapsing the refined partition instead of the working one is the whole difference from
-//! Louvain — it's why badly connected communities don't get locked in.
+//! Collapsing the refined partition rather than the working one is the whole difference from
+//! Louvain.
 
 pub mod local_move;
 pub mod objective;
@@ -48,44 +45,35 @@ use crate::network::CSRNetwork;
 /// Configuration for [`leiden`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct LeidenConfig {
-    /// Quality function to optimize, carrying the resolution parameter.
-    ///
-    /// [`ObjectiveKind::Rb`] at `resolution = 1.0` is modularity, matching `scanpy`'s default.
+    /// Quality function and its resolution. [`ObjectiveKind::Rb`] at `1.0` is modularity,
+    /// matching scanpy's default.
     pub objective: ObjectiveKind,
-    /// Seed for the random node orderings. `Some(_)` makes runs bit-for-bit reproducible;
-    /// `None` draws from the OS.
+    /// Seed for the node orderings. `Some(_)` is bit-for-bit reproducible, `None` draws from
+    /// the OS.
     pub seed: Option<u64>,
-    /// Number of passes, each continuing from the previous result.
-    ///
-    /// Matches `leidenalg` — passes keep improving the same partition rather than restarting
-    /// from singletons, which is how it escapes local optima a single pass falls into. Stops
-    /// early once a pass finds nothing.
+    /// Passes, each continuing from the previous result rather than restarting from
+    /// singletons — same as `leidenalg`. Stops early once a pass finds nothing.
     pub n_iterations: usize,
-    /// Cap on aggregation levels within one pass. Reaching it is unusual — a pass normally
-    /// stops earlier, when collapsing no longer shrinks the graph.
+    /// Cap on aggregation levels per pass. Rarely reached; a pass normally stops when
+    /// collapsing no longer shrinks the graph.
     pub max_levels: usize,
-    /// Minimum improvement for a pass to count as progress, relative to total edge weight.
+    /// Minimum improvement for a pass to count as progress, relative to total edge weight so
+    /// the rule doesn't depend on units.
     ///
-    /// Relative, so the stopping rule doesn't depend on what units the weights are in.
-    ///
-    /// Between passes only, never between levels — a level finding nothing says nothing about
-    /// the coarser level above it, which is exactly where aggregation earns its keep.
+    /// Between passes only. A level finding nothing says nothing about the coarser level
+    /// above it, which is where aggregation earns its keep.
     pub tolerance: f64,
     /// Whether to run the refinement phase. Disabling it turns the algorithm into Louvain.
     pub refine: bool,
-    /// Randomness of community selection during refinement, as in the Leiden paper.
-    ///
-    /// Higher explores more. `0.0` is a deterministic argmax, which gets stuck in local optima
-    /// no number of passes can escape. Deterministic for a fixed [`seed`](Self::seed) either
-    /// way.
+    /// Randomness of refinement's community selection, as in the Leiden paper. Higher
+    /// explores more; `0.0` is argmax, which gets stuck no matter how many passes run. Still
+    /// deterministic for a fixed [`seed`](Self::seed).
     pub refine_randomness: f64,
-    /// How many consecutive passes may find nothing before stopping.
-    ///
-    /// Refinement is randomised, so one fruitless pass isn't proof of convergence. `1` gives
-    /// `leidenalg`'s stop-on-first-stall behaviour.
+    /// Consecutive fruitless passes before stopping. Refinement is randomised, so one proves
+    /// nothing. `1` gives `leidenalg`'s stop-on-first-stall.
     pub patience: usize,
-    /// Optional cap on a community's total node weight. Node weights add up on aggregation, so
-    /// this means the same thing at every level — a limit on original nodes.
+    /// Cap on a community's total node weight. Node weights add up on aggregation, so this is
+    /// a limit on original nodes at every level.
     pub max_community_weight: Option<f64>,
 }
 
@@ -106,7 +94,7 @@ impl Default for LeidenConfig {
 }
 
 impl LeidenConfig {
-    /// Convenience constructor for RB (modularity-style) clustering at a given resolution.
+    /// RB at a given resolution.
     pub fn with_resolution(resolution: f64) -> Self {
         Self {
             objective: ObjectiveKind::Rb { resolution },
@@ -162,9 +150,8 @@ fn build_objective(kind: ObjectiveKind) -> Box<dyn Objective> {
 
 /// Detects communities in `graph`.
 ///
-/// Runs the algorithm [`LeidenConfig::n_iterations`] times, each pass continuing from the
-/// previous result, and stops early once a pass finds no improvement. With a fixed
-/// [`seed`](LeidenConfig::seed) the result is deterministic.
+/// Runs [`LeidenConfig::n_iterations`] passes, each continuing from the last, stopping early
+/// once one finds nothing. Deterministic for a fixed [`seed`](LeidenConfig::seed).
 pub fn leiden(graph: &CSRNetwork, config: &LeidenConfig) -> Result<Clustering> {
     config.validate()?;
 
@@ -203,14 +190,11 @@ pub fn leiden(graph: &CSRNetwork, config: &LeidenConfig) -> Result<Clustering> {
     Ok(Clustering::from_normalized(labels, n_clusters))
 }
 
-/// One pass: local move, refine, aggregate, repeat until the graph stops shrinking.
+/// One pass: local move, refine, aggregate, until the graph stops shrinking.
 ///
-/// Starts from `initial`, not singletons — that's what makes successive passes build on each
-/// other. Returns consecutive labels over the original nodes, the community count, and the
-/// total improvement.
-///
-/// The improvement is just the sum of per-level local-moving gains, which is exact:
-/// aggregation doesn't change quality, and the coarse partition is the same partition.
+/// Starts from `initial` rather than singletons, which is what lets passes build on each
+/// other. Returns labels over the original nodes, the community count, and the improvement —
+/// the sum of per-level gains, which is exact since aggregation doesn't change quality.
 fn run_once(
     graph: &CSRNetwork,
     objective: &dyn Objective,
@@ -264,8 +248,8 @@ fn run_once(
             break;
         }
 
-        // several coarse nodes can share a working community — that's what lets the next
-        // level pull them apart again
+        // several coarse nodes can share a working community, which is what lets the next
+        // level pull them apart
         let mut coarse_membership = vec![0usize; coarse_graph.node_count()];
         for v in 0..level_graph.node_count() {
             coarse_membership[collapse_by.membership(v)] = partition.membership(v);

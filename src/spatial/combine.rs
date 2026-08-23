@@ -1,8 +1,7 @@
 //! Combining graphs, and building them per sample.
 //!
-//! Two operations that both exist because real experiments are not one clean tissue section:
-//! you usually have an expression graph *and* a spatial graph over the same cells, and you
-//! usually have several slices rather than one.
+//! Real experiments give you an expression graph *and* a spatial graph over the same cells,
+//! and several slices rather than one.
 
 use crate::error::{ClusteringError, Result};
 use crate::network::CSRNetwork;
@@ -10,11 +9,8 @@ use crate::network::CSRNetwork;
 /// How to put two graphs on comparable footing before mixing them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Normalization {
-    /// Mix the weights as they are.
-    ///
-    /// Almost never what you want across an expression and a spatial graph: their weights
-    /// live on unrelated scales, so whichever is larger dominates at every `alpha` and the
-    /// parameter stops meaning anything.
+    /// Mix the weights as they are. Rarely right across expression and spatial graphs —
+    /// their scales are unrelated, so the larger one dominates at every `alpha`.
     None,
     /// Scale each graph so its total edge weight is 1, so `alpha` divides a fixed budget.
     #[default]
@@ -23,16 +19,13 @@ pub enum Normalization {
 
 /// Blends two graphs over the same nodes: `alpha · a + (1 − alpha) · b`.
 ///
-/// An edge present in only one contributes only its own side, so the result is the union of
-/// the two edge sets. Both graphs must cover the same nodes.
-///
-/// With [`Normalization::TotalWeight`] each graph is first scaled to unit total weight, which
-/// is what makes `alpha` behave like a proportion rather than an arbitrary knob. It is the
-/// same problem the BANKSY blocks solve by z-scoring, and the same fix.
+/// The result is the union of the two edge sets. [`Normalization::TotalWeight`] scales each
+/// graph to unit total weight first, which is what makes `alpha` a proportion rather than an
+/// arbitrary knob — same problem the BANKSY blocks solve by z-scoring.
 ///
 /// # Errors
 ///
-/// If the graphs have different node counts, or `alpha` is outside `[0, 1]`.
+/// If the node counts differ, or `alpha` is outside `[0, 1]`.
 pub fn fuse(
     a: &CSRNetwork,
     b: &CSRNetwork,
@@ -65,8 +58,7 @@ pub fn fuse(
     };
     let (wa, wb) = (alpha * sa, (1.0 - alpha) * sb);
 
-    // Merge each node's two neighbour lists. Both are sorted ascending, so this is a linear
-    // two-pointer walk and the output stays sorted.
+    // both lists are sorted, so a two-pointer merge keeps the output sorted
     let mut node_ptrs = Vec::with_capacity(n + 1);
     node_ptrs.push(0usize);
     let mut neighbors: Vec<u32> = Vec::new();
@@ -105,7 +97,7 @@ pub fn fuse(
     CSRNetwork::from_csr_parts(node_ptrs, neighbors, weights, None)
 }
 
-/// Reciprocal of a total weight, or 1.0 when there is nothing to scale.
+/// Reciprocal of a total weight, or 1.0 if there's nothing to scale.
 fn scale_to_unit(total: f64) -> f64 {
     if total > 0.0 && total.is_finite() {
         1.0 / total
@@ -116,18 +108,16 @@ fn scale_to_unit(total: f64) -> f64 {
 
 /// Runs a graph builder separately within each sample and reassembles one graph.
 ///
-/// Spatial neighbours are only meaningful within a slice: two cells on different sections are
-/// not adjacent however close their stored coordinates happen to be, and sections are often
-/// laid out overlapping in the same coordinate space. Building globally and deleting
-/// cross-sample edges afterwards is **not** equivalent for k-nearest builders — a cell at a
-/// section's edge would lose neighbours rather than take k from its own section. So the
-/// builder runs per sample.
+/// Cells on different sections aren't adjacent however close their stored coordinates are,
+/// and sections often overlap in the same frame. Building globally and deleting cross-sample
+/// edges afterwards isn't equivalent for kNN — a cell at a section's edge would lose
+/// neighbours rather than take k from its own section.
 ///
-/// `samples` labels each point. Node indices in the result are the caller's original ones.
+/// `samples` labels each point; result indices are the caller's originals.
 ///
 /// # Errors
 ///
-/// If `samples` does not match the point count, or the builder fails on a sample.
+/// If `samples` doesn't match the point count, or the builder fails on a sample.
 pub fn per_sample<F>(points: &[[f64; 2]], samples: &[u32], build: F) -> Result<CSRNetwork>
 where
     F: Fn(&[[f64; 2]]) -> Result<CSRNetwork>,
@@ -143,8 +133,7 @@ where
         return CSRNetwork::from_csr_parts(vec![0], Vec::new(), Vec::new(), None);
     }
 
-    // Group point indices by sample, keeping each group in ascending original order so the
-    // result never depends on how the samples were labelled.
+    // ascending original order within each group, so labelling can't change the result
     let mut order: Vec<u32> = (0..n as u32).collect();
     order.sort_by_key(|&v| (samples[v as usize], v));
 
@@ -216,7 +205,7 @@ mod tests {
         let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
         let mut pts = Vec::new();
         let mut samples = Vec::new();
-        // Deliberately overlapping coordinates: two sections stored in the same frame.
+        // overlapping on purpose: two sections in the same frame
         for s in 0..2u32 {
             for _ in 0..300 {
                 pts.push([rng.random::<f64>() * 50.0, rng.random::<f64>() * 50.0]);
@@ -256,8 +245,7 @@ mod tests {
         f.validate_symmetry().unwrap();
     }
 
-    /// The point of normalising: without it, the graph with heavier weights wins whatever
-    /// alpha says.
+    /// Without normalising, the heavier graph wins whatever alpha says.
     #[test]
     fn normalisation_stops_one_graph_dominating() {
         let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(3);
@@ -265,14 +253,14 @@ mod tests {
             .map(|_| [rng.random::<f64>() * 30.0, rng.random::<f64>() * 30.0])
             .collect();
         let light = radius_graph(&pts, 3.0, SpatialWeight::Uniform, None).unwrap();
-        // Same shape, weights a thousand times larger.
+        // same shape, weights a thousand times larger
         let heavy = {
             let (ptrs, nbrs, w) = light.to_csr_parts();
             CSRNetwork::from_csr_parts(ptrs, nbrs, w.iter().map(|x| x * 1000.0).collect(), None)
                 .unwrap()
         };
 
-        // Normalised, an even blend of a graph with itself is that graph, whatever the scale.
+        // normalised, an even blend of a graph with itself is that graph
         let fused = fuse(&light, &heavy, 0.5, Normalization::TotalWeight).unwrap();
         let first = fused.neighbors(0).next().unwrap().1;
         for v in 0..fused.node_count() {
@@ -284,7 +272,7 @@ mod tests {
             }
         }
 
-        // Unnormalised, the heavy graph contributes ~1000x as much.
+        // unnormalised, the heavy graph contributes ~1000x as much
         let raw = fuse(&light, &heavy, 0.5, Normalization::None).unwrap();
         let w = raw.neighbors(0).next().unwrap().1;
         assert!(w > 400.0, "expected the heavy graph to dominate, got {w}");
@@ -305,8 +293,7 @@ mod tests {
         assert!(fuse(&a, &a, f64::NAN, Normalization::TotalWeight).is_err());
     }
 
-    /// Cells in different sections must never be joined, even where their coordinates
-    /// coincide — which they do here by construction.
+    /// Different sections must never be joined, even where coordinates coincide.
     #[test]
     fn per_sample_never_joins_two_slices() {
         let (pts, samples) = two_slices(5);
@@ -332,8 +319,8 @@ mod tests {
         }
     }
 
-    /// The reason it builds per sample rather than filtering afterwards: with kNN, a cell at
-    /// a section's edge must take k neighbours from its own section, not lose them.
+    /// Why it builds per sample: a cell at a section's edge must take k from its own
+    /// section, not lose them.
     #[test]
     fn per_sample_knn_keeps_every_cell_at_full_degree() {
         let (pts, samples) = two_slices(6);
@@ -346,7 +333,7 @@ mod tests {
             assert!(g.degree(v) >= k, "node {v} has degree {}", g.degree(v));
         }
 
-        // Build globally and delete cross-sample edges, and cells lose neighbours instead.
+        // build globally and delete afterwards, and cells lose neighbours instead
         let global = knn_graph(&pts, k, Symmetry::Union, SpatialWeight::Uniform).unwrap();
         let starved = (0..global.node_count())
             .filter(|&v| {
@@ -367,7 +354,7 @@ mod tests {
     #[test]
     fn per_sample_handles_edge_cases() {
         let pts = vec![[0.0, 0.0], [1.0, 0.0], [50.0, 50.0]];
-        // A sample of one has no neighbours, and must not break the reassembly.
+        // a sample of one has no neighbours, and must not break reassembly
         let samples = vec![0u32, 0, 1];
         let g = per_sample(&pts, &samples, |sub| {
             radius_graph(sub, 5.0, SpatialWeight::Uniform, None)
@@ -400,7 +387,7 @@ mod tests {
         );
     }
 
-    /// Sample labels are arbitrary; only the grouping matters.
+    /// Labels are arbitrary, only the grouping matters.
     #[test]
     fn per_sample_is_independent_of_label_values() {
         let (pts, samples) = two_slices(7);
