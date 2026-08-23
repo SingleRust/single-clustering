@@ -74,13 +74,30 @@ biology rather than about matching another implementation — **ours scores ARI 
 
 ## Performance
 
-Timings are against `scanpy`/`igraph`, which is a C implementation called from Python, not
-interpreted code — so these are not interpreter-overhead numbers.
+The comparison is against `igraph`, which is C called from Python — so these are not
+interpreter-overhead numbers. Both sides cluster the identical graph and **only the
+clustering call is timed**; graph construction is excluded, because including it measures the
+pipeline rather than the algorithm.
 
-| workload | this crate | `scanpy` / `igraph` | speedup |
-|---|---|---|---|
-| PBMC3k, per resolution | 7–11 ms | 22–24 ms | 2–3× |
-| synthetic k-NN graphs, geometric mean | — | — | 1.33× |
+| nodes | edges | this crate | `igraph` | speedup |
+|---|---|---|---|---|
+| 20k | 158k | 0.030 s | 0.041 s | 1.38× |
+| 100k | 798k | 0.166 s | 0.257 s | 1.55× |
+| 500k | 4.0M | 1.605 s | 1.846 s | 1.15× |
+| 1M | 8.0M | 3.457 s | 4.211 s | 1.22× |
+
+**Geometric mean 1.32×**, and modularity is identical to four decimals at every size — this is
+the same answer computed faster, not a different tradeoff. Reproduce with
+`examples/vs_igraph.rs` and `tools/igraph_bench.py`.
+
+Note the margin narrows above 100k: both implementations become memory-latency bound on the
+same scatter-gather access pattern, so the remaining headroom is parallelism rather than
+single-threaded tuning.
+
+End to end through `scanpy`, `sc.tl.leiden` takes 22–24 ms per resolution on PBMC3k against
+7–11 ms here, but that gap is **not** the algorithm — most of it is `scanpy` converting its
+sparse matrix into an igraph object inside the timed call. The table above is the honest
+algorithmic comparison.
 
 Single-threaded scaling on synthetic k-NN graphs:
 
