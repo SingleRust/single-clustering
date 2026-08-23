@@ -36,6 +36,12 @@ jobs:
       - name: Test (release)
         run: cargo test --no-default-features --release
 
+      # the parallel path must give byte-identical results, so it needs its own run
+      - name: Clippy (parallel)
+        run: cargo clippy --no-default-features --features parallel --all-targets -- -D warnings
+      - name: Test (parallel)
+        run: cargo test --no-default-features --features parallel --release
+
   # the #[ignore]d tests: scale runs and the exhaustive optimality sweep. ~11s total, and
   # without this the HD-scale path and the Bell(12) optimality check never execute anywhere.
   scale:

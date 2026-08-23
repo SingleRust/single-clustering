@@ -40,21 +40,58 @@ impl InsertContext {
     }
 }
 
+/// The community aggregates a move actually depends on.
+///
+/// Only three numbers, which is what lets refinement work on per-community local state
+/// instead of the whole partition — the basis of running it in parallel.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CommunityView {
+    /// Total edge weight of the graph, each edge once. Global, not per community.
+    pub total_weight: f64,
+    /// Summed node strength of the community — `K_c` in the RB null model.
+    pub strength: f64,
+    /// Summed node weight of the community — `n_c` in CPM.
+    pub weight: f64,
+}
+
 /// A quality function to maximize.
 pub trait Objective: Send + Sync {
-    /// Change in quality from inserting a currently-removed node into `community`.
+    /// Change in quality from inserting a currently-removed node into a community.
+    ///
+    /// The one place each objective's formula lives. [`delta_insert`](Self::delta_insert)
+    /// reads the view out of a [`Partition`] and calls this, so the partition-backed and
+    /// local-state paths can never drift apart.
     ///
     /// `weight_to_comm` excludes the node's self-loop; that gets added here, since it becomes
     /// internal to whichever community the node lands in.
+    fn delta_insert_view(
+        &self,
+        view: CommunityView,
+        ctx: &InsertContext,
+        weight_to_comm: f64,
+    ) -> f64;
+
+    /// Change in quality from inserting a currently-removed node into `community`.
     ///
     /// `community` may name an unallocated slot, which reads as empty.
+    #[inline]
     fn delta_insert(
         &self,
         partition: &Partition,
         ctx: &InsertContext,
         community: usize,
         weight_to_comm: f64,
-    ) -> f64;
+    ) -> f64 {
+        self.delta_insert_view(
+            CommunityView {
+                total_weight: partition.total_weight(),
+                strength: partition.strength(community),
+                weight: partition.weight(community),
+            },
+            ctx,
+            weight_to_comm,
+        )
+    }
 
     /// Total quality of the partition, in the same units as [`delta_insert`](Self::delta_insert).
     fn quality(&self, partition: &Partition) -> f64;
@@ -88,18 +125,17 @@ impl Default for Rb {
 
 impl Objective for Rb {
     #[inline]
-    fn delta_insert(
+    fn delta_insert_view(
         &self,
-        partition: &Partition,
+        view: CommunityView,
         ctx: &InsertContext,
-        community: usize,
         weight_to_comm: f64,
     ) -> f64 {
-        let four_m = 4.0 * partition.total_weight();
+        let four_m = 4.0 * view.total_weight;
         if four_m == 0.0 {
             return 0.0;
         }
-        let k_c = partition.strength(community);
+        let k_c = view.strength;
         let k = ctx.node_strength;
         // d/dK of γ·K²/(4m) discretised: ((K+k)² − K²) = k·(2K + k)
         (weight_to_comm + ctx.self_loop) - self.resolution * k * (2.0 * k_c + k) / four_m
@@ -155,14 +191,13 @@ impl Default for Cpm {
 
 impl Objective for Cpm {
     #[inline]
-    fn delta_insert(
+    fn delta_insert_view(
         &self,
-        partition: &Partition,
+        view: CommunityView,
         ctx: &InsertContext,
-        community: usize,
         weight_to_comm: f64,
     ) -> f64 {
-        let n_c = partition.weight(community);
+        let n_c = view.weight;
         let a = ctx.node_weight;
         // ((n+a)(n+a-1) - n(n-1)) / 2 = a(2n + a - 1) / 2
         (weight_to_comm + ctx.self_loop) - self.resolution * a * (2.0 * n_c + a - 1.0) / 2.0

@@ -79,20 +79,23 @@ interpreter-overhead numbers. Both sides cluster the identical graph and **only 
 clustering call is timed**; graph construction is excluded, because including it measures the
 pipeline rather than the algorithm.
 
-| nodes | edges | this crate | `igraph` | speedup |
-|---|---|---|---|---|
-| 20k | 158k | 0.030 s | 0.041 s | 1.38× |
-| 100k | 798k | 0.166 s | 0.257 s | 1.55× |
-| 500k | 4.0M | 1.605 s | 1.846 s | 1.15× |
-| 1M | 8.0M | 3.457 s | 4.211 s | 1.22× |
+| nodes | edges | this crate | + `parallel` | `igraph` | speedup |
+|---|---|---|---|---|---|
+| 100k | 798k | 0.150 s | 0.117 s | 0.199 s | 1.33× / **1.70×** |
+| 500k | 4.0M | 1.113 s | 0.912 s | 1.469 s | 1.32× / **1.61×** |
+| 1M | 8.0M | 2.568 s | 2.202 s | 3.410 s | 1.33× / **1.55×** |
 
-**Geometric mean 1.32×**, and modularity is identical to four decimals at every size — this is
-the same answer computed faster, not a different tradeoff. Reproduce with
-`examples/vs_igraph.rs` and `tools/igraph_bench.py`.
+Single-threaded it is a consistent **1.33×**; with the `parallel` feature, which multi-threads
+refinement, **1.55–1.70×**. Modularity is identical to four decimals throughout — the same
+answer computed faster, not a different tradeoff. Reproduce with `examples/vs_igraph.rs` and
+`tools/igraph_bench.py`.
 
-Note the margin narrows above 100k: both implementations become memory-latency bound on the
-same scatter-gather access pattern, so the remaining headroom is parallelism rather than
-single-threaded tuning.
+Both implementations are memory-latency bound on the same scatter-gather access pattern, so
+single-threaded tuning is close to exhausted — node reordering for cache locality was measured
+at only 1.13× (`examples/reorder.rs`). The remaining headroom is parallelism: `examples/scaling_ceiling.rs`
+measures the memory system sustaining 5.1× on 8 threads and 8× on 16, and 89% of a run is
+parallelisable, so the ceiling is real. Refinement is done; local moving is the larger half and
+is not yet parallel.
 
 End to end through `scanpy`, `sc.tl.leiden` takes 22–24 ms per resolution on PBMC3k against
 7–11 ms here, but that gap is **not** the algorithm — most of it is `scanpy` converting its
@@ -202,6 +205,17 @@ clustering core — useful in CI, or on targets where the HNSW stack does not co
 single-clustering = { version = "0.7", default-features = false }
 ```
 
+Multi-threaded refinement is behind an off-by-default `parallel` feature. It is off because
+local moving — the larger half of the work — is still sequential, so the gain is 1.2-1.3x
+rather than the several-x a fully parallel implementation would give:
+
+```toml
+single-clustering = { version = "0.7", features = ["parallel"] }
+```
+
+Results are byte-identical regardless of thread count; `tests/thread_invariance.rs` asserts it
+across thread counts, objectives and seeds.
+
 ## Current status
 
 - ✅ **Leiden algorithm**: local moving, refinement, and aggregation
@@ -214,9 +228,10 @@ single-clustering = { version = "0.7", default-features = false }
   Leiden finds spatial domains
 - 🚧 **Louvain**: available as `LeidenConfig { refine: false, .. }`; no separate entry point
 - 🚧 **Benchmarks**: `cargo run --release --example scaling`
-- ❌ **Parallel local moving**: planned, deliberately deferred until the sequential path is
-  measured. Profiling puts 94% of a pass in level 0, of which local moving is 65% and
-  refinement 29%, so that is where it would go
+- ✅ **Parallel refinement** (`parallel` feature): communities refine independently, so there
+  is no shared state to race on. 1.2-1.3x, and byte-identical across thread counts
+- ❌ **Parallel local moving**: the other 65% of a pass, and the harder half — it mutates
+  shared community aggregates, which is what the pre-0.7 parallel path got wrong
 - ❌ **DBSCAN / HDBSCAN**: planned
 - ❌ **Python bindings**: PyO3 integration (planned)
 
