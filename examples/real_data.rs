@@ -5,14 +5,9 @@
 //! cargo run --release --no-default-features --example real_data -- /tmp/pbmc3k
 //! ```
 //!
-//! Clusters the *same* connectivity matrix scanpy did, so any difference is the algorithm,
-//! not graph construction. Reports:
-//!
-//! * cluster count vs resolution, ours against scanpy's
-//! * agreement with scanpy's partition (ARI / NMI)
-//! * agreement with the author cell-type annotation — the only number here that's about
-//!   biology rather than matching another implementation
-//! * modularity and wall time
+//! Clusters the *same* connectivity matrix scanpy did, so any difference is the algorithm
+//! rather than graph construction. Reports cluster count vs resolution, agreement with
+//! scanpy's partition and with the author annotations, modularity, and wall time.
 
 use single_clustering::community_search::leiden::{LeidenConfig, leiden, modularity};
 use single_clustering::network::CSRNetwork;
@@ -43,10 +38,7 @@ fn read_f32(path: &Path) -> Vec<f32> {
         .collect()
 }
 
-/// Adjusted Rand Index: agreement between two partitions, corrected for chance.
-///
-/// The standard measure for comparing clusterings against a reference labelling. 1.0 is exact
-/// agreement, 0.0 is what random labelling would score.
+/// Adjusted Rand Index. 1.0 is exact agreement, 0.0 is what random labelling scores.
 fn adjusted_rand_index(a: &[usize], b: &[usize]) -> f64 {
     let n = a.len() as f64;
     if n == 0.0 {

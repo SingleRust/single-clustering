@@ -1,35 +1,29 @@
 //! Quality functions.
 //!
 //! An [`Objective`] scores a [`Partition`], and more usefully scores *inserting* a removed
-//! node into a candidate community. Both read only the aggregates the partition already
-//! maintains, so neither touches the graph.
+//! node into a candidate community. Both read only maintained aggregates, never the graph.
 //!
-//! # Scaling
-//!
-//! Everything here is `Σ_c [ internal_c − null_c ]` with each internal edge counted once. For
-//! [`Rb`] the null term is `γ·K_c²/(4m)`. That `4m` is load-bearing — with `2m` you get `Rb`
-//! at resolution `2γ`, which is why this crate used to return about twice as many communities
-//! as `leidenalg` at the same nominal resolution. [`modularity`] reports a value directly
-//! comparable with `scanpy`/`leidenalg`.
+//! Everything is `Σ_c [ internal_c − null_c ]`, each internal edge once. [`Rb`]'s null term is
+//! `γ·K_c²/(4m)` — that `4m` is load-bearing, since `2m` gives `Rb` at resolution `2γ`, which
+//! is the 0.6.x bug. [`modularity`] reports a value directly comparable with `scanpy`.
 
 use crate::community_search::leiden::partition::Partition;
 use crate::network::CSRNetwork;
 
-/// The node-level quantities an objective needs to score an insertion.
-///
-/// Built once per node by the local-moving loop and reused across every candidate community.
+/// What an objective needs about the node being moved. Built once per node, reused across
+/// every candidate.
 #[derive(Debug, Clone, Copy)]
 pub struct InsertContext {
-    /// Sum of the node's incident edge weights, self-loop counted twice.
+    /// Incident edge weight, self-loop counted twice.
     pub node_strength: f64,
-    /// The node's own weight ("size"), summed across members after aggregation.
+    /// The node's own weight, summed across members after aggregation.
     pub node_weight: f64,
     /// Weight of the node's self-loop, or `0.0`.
     pub self_loop: f64,
 }
 
 impl InsertContext {
-    /// Reads the quantities for `node` out of `graph`.
+    /// Reads them for `node` out of `graph`.
     #[inline]
     pub fn for_node(graph: &CSRNetwork, node: usize) -> Self {
         Self {
@@ -40,41 +34,74 @@ impl InsertContext {
     }
 }
 
+/// The community aggregates a move depends on.
+///
+/// Three numbers, which is what lets refinement work on local state instead of the whole
+/// partition — and so run in parallel.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CommunityView {
+    /// Total edge weight of the graph, each edge once. Global, not per community.
+    pub total_weight: f64,
+    /// Summed node strength of the community — `K_c` in the RB null model.
+    pub strength: f64,
+    /// Summed node weight of the community — `n_c` in CPM.
+    pub weight: f64,
+}
+
 /// A quality function to maximize.
 pub trait Objective: Send + Sync {
-    /// Change in quality from inserting a currently-removed node into `community`.
+    /// Quality change from inserting a removed node into a community.
     ///
-    /// `weight_to_comm` excludes the node's self-loop; that gets added here, since it becomes
-    /// internal to whichever community the node lands in.
+    /// The one place each formula lives — [`delta_insert`](Self::delta_insert) reads the view
+    /// out of a [`Partition`] and calls this, so the two paths can't drift.
     ///
-    /// `community` may name an unallocated slot, which reads as empty.
+    /// `weight_to_comm` excludes the self-loop, which gets added here.
+    fn delta_insert_view(
+        &self,
+        view: CommunityView,
+        ctx: &InsertContext,
+        weight_to_comm: f64,
+    ) -> f64;
+
+    /// Quality change from inserting a removed node into `community`, which may be an
+    /// unallocated slot — that reads as empty.
+    #[inline]
     fn delta_insert(
         &self,
         partition: &Partition,
         ctx: &InsertContext,
         community: usize,
         weight_to_comm: f64,
-    ) -> f64;
+    ) -> f64 {
+        self.delta_insert_view(
+            CommunityView {
+                total_weight: partition.total_weight(),
+                strength: partition.strength(community),
+                weight: partition.weight(community),
+            },
+            ctx,
+            weight_to_comm,
+        )
+    }
 
-    /// Total quality of the partition, in the same units as [`delta_insert`](Self::delta_insert).
+    /// Total quality, in the same units as [`delta_insert`](Self::delta_insert).
     fn quality(&self, partition: &Partition) -> f64;
 
-    /// The resolution parameter. Higher values favour smaller communities.
+    /// Higher values favour smaller communities.
     fn resolution(&self) -> f64;
 }
 
-/// Reichardt–Bornholdt configuration-model objective.
+/// Reichardt–Bornholdt configuration model.
 ///
-/// `Q = Σ_c [ internal_c − γ · K_c² / (4m) ]`, with `K_c` the summed node strength of `c` and
-/// `m` the total edge weight. At `γ = 1` this is modularity, matching `leidenalg`'s
-/// `RBConfigurationVertexPartition` and so `scanpy`'s default.
+/// `Q = Σ_c [ internal_c − γ · K_c² / (4m) ]`. At `γ = 1` this is modularity, matching
+/// `leidenalg`'s `RBConfigurationVertexPartition` and so scanpy's default.
 #[derive(Debug, Clone, Copy)]
 pub struct Rb {
     resolution: f64,
 }
 
 impl Rb {
-    /// Creates an RB objective with the given resolution.
+    /// RB at the given resolution.
     pub fn new(resolution: f64) -> Self {
         Self { resolution }
     }
@@ -88,18 +115,17 @@ impl Default for Rb {
 
 impl Objective for Rb {
     #[inline]
-    fn delta_insert(
+    fn delta_insert_view(
         &self,
-        partition: &Partition,
+        view: CommunityView,
         ctx: &InsertContext,
-        community: usize,
         weight_to_comm: f64,
     ) -> f64 {
-        let four_m = 4.0 * partition.total_weight();
+        let four_m = 4.0 * view.total_weight;
         if four_m == 0.0 {
             return 0.0;
         }
-        let k_c = partition.strength(community);
+        let k_c = view.strength;
         let k = ctx.node_strength;
         // d/dK of γ·K²/(4m) discretised: ((K+k)² − K²) = k·(2K + k)
         (weight_to_comm + ctx.self_loop) - self.resolution * k * (2.0 * k_c + k) / four_m
@@ -124,24 +150,21 @@ impl Objective for Rb {
     }
 }
 
-/// Constant Potts Model objective.
+/// Constant Potts Model.
 ///
-/// `Q = Σ_c [ internal_c − γ · n_c(n_c − 1) / 2 ]`, where `n_c` is the summed node weight of
-/// community `c` — that is, the internal weight minus `γ` times the number of node *pairs*
-/// inside the community. Unlike RB, CPM has no resolution limit: `γ` is directly the internal
-/// edge density below which a community will not form, so it behaves predictably as you turn
-/// the knob on large graphs.
+/// `Q = Σ_c [ internal_c − γ · n_c(n_c − 1) / 2 ]` over summed node weight `n_c`. No
+/// resolution limit: `γ` is directly the internal edge density below which a community won't
+/// form, so it behaves predictably on large graphs.
 ///
-/// The pair count matches `leidenalg`'s `CPMVertexPartition`, whose reported quality is
-/// exactly twice this one's. Because node weights are summed on aggregation, `n_c` counts
-/// original nodes at every level, so the objective is unchanged by collapsing.
+/// The pair count matches `leidenalg`'s `CPMVertexPartition`, which reports exactly twice
+/// this. Node weights sum on aggregation, so `n_c` counts original nodes at every level.
 #[derive(Debug, Clone, Copy)]
 pub struct Cpm {
     resolution: f64,
 }
 
 impl Cpm {
-    /// Creates a CPM objective with the given resolution.
+    /// CPM at the given resolution.
     pub fn new(resolution: f64) -> Self {
         Self { resolution }
     }
@@ -155,14 +178,13 @@ impl Default for Cpm {
 
 impl Objective for Cpm {
     #[inline]
-    fn delta_insert(
+    fn delta_insert_view(
         &self,
-        partition: &Partition,
+        view: CommunityView,
         ctx: &InsertContext,
-        community: usize,
         weight_to_comm: f64,
     ) -> f64 {
-        let n_c = partition.weight(community);
+        let n_c = view.weight;
         let a = ctx.node_weight;
         // ((n+a)(n+a-1) - n(n-1)) / 2 = a(2n + a - 1) / 2
         (weight_to_comm + ctx.self_loop) - self.resolution * a * (2.0 * n_c + a - 1.0) / 2.0
@@ -205,7 +227,7 @@ impl Default for ObjectiveKind {
 }
 
 impl ObjectiveKind {
-    /// The resolution parameter carried by this objective.
+    /// The resolution this carries.
     pub fn resolution(&self) -> f64 {
         match *self {
             Self::Rb { resolution } | Self::Cpm { resolution } => resolution,
@@ -213,11 +235,11 @@ impl ObjectiveKind {
     }
 }
 
-/// Standard Newman–Girvan modularity of a labelling, computed directly from the graph.
+/// Newman–Girvan modularity of a labelling, straight from the graph.
 ///
-/// Deliberately independent of [`Partition`] and [`Objective`]: it is what users should report
-/// and compare against `scanpy`, and it doubles as an outside check on the optimizer's own
-/// arithmetic. At `resolution = 1.0` this is textbook modularity in `[-1, 1]`.
+/// Independent of [`Partition`] and [`Objective`] on purpose: it's what to report and compare
+/// against scanpy, and it doubles as an outside check on the optimizer's arithmetic. At
+/// `resolution = 1.0` it's textbook modularity in `[-1, 1]`.
 pub fn modularity(graph: &CSRNetwork, labels: &[usize], resolution: f64) -> f64 {
     let m = graph.total_weight();
     if m == 0.0 {
@@ -257,7 +279,7 @@ mod tests {
         let q_scaled = Rb::new(1.0).quality(&p);
         let q_standard = modularity(&g, &labels, 1.0);
 
-        // Rb::quality is m * Q — the scaling the old code got wrong by 2x
+        // Rb::quality is m * Q, the scaling the old code got wrong by 2x
         assert!(
             (q_scaled / g.total_weight() - q_standard).abs() < 1e-12,
             "Rb::quality/m = {}, modularity = {q_standard}",
@@ -274,7 +296,7 @@ mod tests {
         let g = karate();
         let labels = karate_optimum();
         let p = Partition::from_membership(&g, &labels);
-        // Rb(gamma) == textbook Q(gamma), not Q(2*gamma) like the old code
+        // Rb(gamma) == textbook Q(gamma), not Q(2*gamma) as before
         for gamma in [0.5, 1.0, 2.0, 4.0] {
             let got = Rb::new(gamma).quality(&p) / g.total_weight();
             let want = modularity(&g, &labels, gamma);
@@ -282,7 +304,7 @@ mod tests {
         }
     }
 
-    /// The invariant that catches any drift between the delta and the objective.
+    /// Catches any drift between the delta and the objective.
     fn delta_matches_quality_change<O: Objective>(obj: &O, graph: &CSRNetwork, labels: &[usize]) {
         use crate::community_search::leiden::partition::NeighborWeights;
         let mut p = Partition::from_membership(graph, labels);

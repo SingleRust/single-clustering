@@ -1,11 +1,8 @@
 //! Exhaustive optimality checks on small graphs.
 //!
-//! Small enough to enumerate every set partition, so the true optimum is computable. The only
-//! test here that checks ground truth rather than another implementation — nothing in it can
-//! be fooled by a shared misunderstanding of the objective.
-//!
-//! Kept small enough for the normal suite; `exhaustive_optimality_larger` does `n = 10..12`
-//! and is `#[ignore]`d.
+//! Small enough to enumerate every set partition, so this is ground truth rather than another
+//! implementation — nothing here can be fooled by a shared misunderstanding of the objective.
+//! `exhaustive_optimality_larger` does `n = 10..12` and is `#[ignore]`d.
 
 use single_clustering::community_search::leiden::{LeidenConfig, leiden, modularity};
 use single_clustering::network::CSRNetwork;
@@ -15,9 +12,8 @@ mod common;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
-/// Visits every set partition of `n` items via restricted growth strings, calling `f` with
-/// each labelling. There are `Bell(n)` of them: 4140 for n=8, 115975 for n=10, 4213597 for
-/// n=12.
+/// Every set partition of `n` items, via restricted growth strings. `Bell(n)` of them: 4140
+/// at n=8, 4213597 at n=12.
 fn for_each_partition(n: usize, mut f: impl FnMut(&[usize])) {
     let mut a = vec![0usize; n];
     let mut max_seen = vec![0usize; n];
@@ -49,7 +45,7 @@ fn for_each_partition(n: usize, mut f: impl FnMut(&[usize])) {
     }
 }
 
-/// True modularity optimum of `graph` at the given resolution, by exhaustive enumeration.
+/// True modularity optimum, by exhaustive enumeration.
 fn brute_force_optimum(graph: &CSRNetwork, resolution: f64) -> f64 {
     let n = graph.node_count();
     let mut best = f64::NEG_INFINITY;
@@ -62,7 +58,7 @@ fn brute_force_optimum(graph: &CSRNetwork, resolution: f64) -> f64 {
     best
 }
 
-/// Random graphs spanning a range of densities, plus a few structured ones.
+/// Random graphs across a range of densities, plus a few structured ones.
 fn small_graphs(n: usize, count: usize, seed: u64) -> Vec<(String, CSRNetwork)> {
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
     let mut out = Vec::new();
@@ -86,7 +82,7 @@ fn small_graphs(n: usize, count: usize, seed: u64) -> Vec<(String, CSRNetwork)> 
         ));
     }
 
-    // two cliques joined by one edge: an unambiguous optimum
+    // two cliques joined by one edge: unambiguous optimum
     if n >= 6 {
         let half = n / 2;
         let mut edges = Vec::new();
@@ -121,7 +117,7 @@ fn check_optimality(sizes: &[usize], graphs_per_size: usize, resolutions: &[f64]
             for &resolution in resolutions {
                 let best = brute_force_optimum(&graph, resolution);
 
-                // Give the optimizer the same budget a user would.
+                // same budget a user would give it
                 let clustering = leiden(
                     &graph,
                     &LeidenConfig {
@@ -143,8 +139,7 @@ fn check_optimality(sizes: &[usize], graphs_per_size: usize, resolutions: &[f64]
                 if ours >= best - 1e-9 {
                     optimal += 1;
                 } else {
-                    // absolute, not relative: modularity is in [-1, 1] and these optima sit
-                    // near zero, where relative error explodes meaninglessly — -0.034 vs
+                    // absolute, not relative: these optima sit near zero, where -0.034 vs
                     // -0.018 is "87% worse" relatively but 0.016 absolutely
                     let gap = best - ours;
                     if gap > worst_gap {
@@ -168,12 +163,9 @@ fn check_optimality(sizes: &[usize], graphs_per_size: usize, resolutions: &[f64]
          modularity ({worst_case})"
     );
 
-    // Measured on these fixtures: the true optimum is found on 93.5% of 108 cases, worst gap
-    // 0.027 modularity (0.050 for the n=10..12 variant). `leidenalg` on the identical graphs gets 95.4% at its default budget
-    // and 96.3% at 10x that, hitting the same hardest instance — it defeats both. These are
-    // small dense random graphs with no community structure, i.e. a deliberately flat,
-    // adversarial landscape; the bounds below sit just outside the measured values so a
-    // genuine regression trips them.
+    // Measured: optimal on 93.5% of 108 cases, worst gap 0.027 (0.050 for n=10..12).
+    // `leidenalg` gets 95.4-96.3% on the same graphs and loses the same hardest instance.
+    // Bounds sit just outside the measured values, so a real regression trips them.
     assert!(
         rate >= 90.0,
         "found the true optimum in only {rate:.1}% of {checked} cases (expected ~93.5%)"
@@ -190,14 +182,14 @@ fn finds_the_true_optimum_on_small_graphs() {
     check_optimality(&[6, 7, 8, 9], 8, &[0.5, 1.0, 2.0]);
 }
 
-/// Same, for n = 10..12. Slow (Bell(12) = 4.2M partitions per graph per resolution).
+/// Same for n = 10..12. Slow: Bell(12) = 4.2M partitions per graph per resolution.
 #[test]
 #[ignore = "exhaustive over Bell(12); run with --ignored"]
 fn exhaustive_optimality_larger() {
     check_optimality(&[10, 11, 12], 6, &[0.5, 1.0, 2.0]);
 }
 
-/// The enumerator itself must be right, or the whole test is worthless.
+/// The enumerator itself must be right, or none of this means anything.
 #[test]
 fn partition_enumerator_is_correct() {
     // Bell numbers
@@ -215,8 +207,7 @@ fn partition_enumerator_is_correct() {
         let mut seen = std::collections::HashSet::new();
         for_each_partition(n, |labels| {
             count += 1;
-            // canonical form: labels are already a restricted growth string, so they are a
-            // unique representative of the set partition
+            // a restricted growth string is already a unique representative
             seen.insert(labels.to_vec());
             assert_eq!(labels.len(), n);
             assert_eq!(labels[0], 0, "restricted growth strings start at 0");

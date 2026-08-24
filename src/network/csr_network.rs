@@ -1,28 +1,17 @@
 //! CSR storage for a weighted, undirected graph.
 //!
-//! ## Weight conventions
+//! igraph/leidenalg weight conventions, which every quality function here depends on:
 //!
-//! igraph/leidenalg conventions. Every quality function here depends on them:
-//!
-//! - edge `{u, v}` of weight `w` → `w` to `strength(u)`, `w` to `strength(v)`, `w` to
-//!   [`total_weight`](CSRNetwork::total_weight)
+//! - edge `{u, v}` of weight `w` → `w` to each endpoint's strength, `w` to `total_weight`
 //! - **self-loop** on `v` of weight `w` → **`2w`** to `strength(v)`, `w` to `total_weight`
 //!
-//! Which gives the invariant `Σ strength(v) == 2 · total_weight`. This matters because
-//! [`aggregate`](CSRNetwork::aggregate) packs a community's whole internal weight into one
-//! self-loop — get the degree contribution wrong and the null model silently dies above
-//! level 0.
+//! So `Σ strength(v) == 2 · total_weight`. [`aggregate`](CSRNetwork::aggregate) packs a
+//! community's internal weight into one self-loop, so getting that wrong kills the null model
+//! above level 0.
 //!
-//! ## Memory layout
-//!
-//! `u32` ids and `f32` weights, so 8 bytes per stored entry / 16 per undirected edge. Per-node
-//! data and all arithmetic stay `f64` — weights are read at `f32`, never accumulated at it.
-//! Node weights especially, since after aggregation they count original nodes and would lose
-//! integer precision past 2^24.
-//!
-//! ~12 GB of adjacency at 75M nodes rather than ~24. [`from_csr_parts`](CSRNetwork::from_csr_parts)
-//! takes buffers you already have without copying; [`from_edges`](CSRNetwork::from_edges) also
-//! needs the caller's edge list resident, but builds in place rather than doubling.
+//! `u32` ids and `f32` weights: 16 bytes per undirected edge, ~12 GB of adjacency at 75M
+//! nodes rather than ~24. Per-node data and all arithmetic stay `f64` — node weights count
+//! original nodes after aggregation and would lose integer precision past 2^24.
 
 use std::sync::Arc;
 
@@ -30,15 +19,15 @@ use nalgebra_sparse::CsrMatrix;
 use single_utilities::traits::FloatOpsTS;
 
 use crate::error::{ClusteringError, Result};
-use crate::network::grouping::NetworkGrouping;
+use crate::network::grouping::VectorGrouping;
 
 /// Largest addressable node id. `u32` adjacency caps the graph at ~4.29 billion nodes.
 pub const MAX_NODES: usize = u32::MAX as usize;
 
 #[derive(Debug, Clone)]
 struct CSRNetworkData {
-    /// Offsets into `neighbors`/`weights`; length `n_nodes + 1`. Stays `usize`, since it
-    /// indexes an array with up to `2m` entries.
+    /// Offsets into `neighbors`/`weights`, length `n_nodes + 1`. `usize`, since it indexes
+    /// up to `2m` entries.
     node_ptrs: Vec<usize>,
     /// Neighbour ids, strictly increasing within each node's slice.
     neighbors: Vec<u32>,
@@ -52,26 +41,23 @@ struct CSRNetworkData {
     total_weight: f64,
     /// Number of distinct undirected edges, self-loops included.
     edge_count: usize,
-    /// Whether any node carries a self-loop.
-    ///
-    /// Lets `self_loop_weight` skip its binary search on graphs without any — which the level-0
-    /// graph, where most node visits happen, normally is. That search was ~4% of runtime.
+    /// Lets `self_loop_weight` skip its binary search, which the level-0 graph normally can.
+    /// That search was ~4% of runtime.
     any_self_loops: bool,
 }
 
 /// A weighted, undirected graph in compressed-sparse-row form.
 ///
-/// Cloning is cheap: the underlying data is shared behind an [`Arc`]. See the module-level
-/// documentation for the weight conventions and memory layout this type guarantees.
+/// Cloning is cheap — the data is shared behind an [`Arc`].
 #[derive(Debug, Clone)]
 pub struct CSRNetwork {
     data: Arc<CSRNetworkData>,
 }
 
-/// Iterator over `(neighbor, weight)` pairs for one node.
+/// Iterator over one node's `(neighbor, weight)` pairs.
 ///
-/// Yields `usize`/`f64` regardless of the narrower storage types, so callers can index
-/// directly and do arithmetic at full precision.
+/// Yields `usize`/`f64` whatever the storage types, so callers can index and do arithmetic
+/// directly.
 pub struct CSRNeighborIterator<'a> {
     neighbors: std::slice::Iter<'a, u32>,
     weights: std::slice::Iter<'a, f32>,
@@ -96,11 +82,10 @@ impl Iterator for CSRNeighborIterator<'_> {
 impl ExactSizeIterator for CSRNeighborIterator<'_> {}
 
 impl CSRNetwork {
-    /// Builds a graph from an edge list, giving every node unit weight.
+    /// Builds a graph from an edge list, every node at unit weight.
     ///
-    /// Each undirected edge should be supplied **once**; `(u, v, w)` and `(v, u, w)` are two
-    /// parallel edges, not one. Parallel edges between the same pair are merged by summing
-    /// their weights. A `(v, v, w)` entry is a self-loop of weight `w`.
+    /// Give each undirected edge **once** — `(u, v, w)` and `(v, u, w)` are two parallel
+    /// edges, not one. Parallel edges are merged by summing. `(v, v, w)` is a self-loop.
     pub fn from_edges<W>(n_nodes: usize, edges: &[(usize, usize, W)]) -> Result<Self>
     where
         W: FloatOpsTS + 'static,
@@ -110,13 +95,12 @@ impl CSRNetwork {
 
     /// Builds a graph from an edge list with explicit node weights.
     ///
-    /// Node weight is a node's "size", and what CPM measures communities in. Usually all
-    /// `1.0` straight from data; it starts mattering after [`aggregate`](Self::aggregate),
-    /// where a super-node's weight is the sum of its members'.
+    /// Node weight is a node's "size" and what CPM measures. Usually all `1.0`; it starts
+    /// mattering after [`aggregate`](Self::aggregate), where a super-node's weight is the sum
+    /// of its members'.
     ///
-    /// Allocates the adjacency arrays once and sorts in place, so peak memory is the graph
-    /// plus the caller's edge list, not double. For very large inputs
-    /// [`from_csr_parts`](Self::from_csr_parts) needs no edge list at all.
+    /// Allocates once and sorts in place, so peak memory is the graph plus the caller's edge
+    /// list, not double. [`from_csr_parts`](Self::from_csr_parts) needs no edge list at all.
     pub fn from_edges_with_node_weights<W>(
         edges: &[(usize, usize, W)],
         node_weights: Vec<f64>,
@@ -166,22 +150,13 @@ impl CSRNetwork {
         Self::finish(node_ptrs, neighbors, weights, node_weights, true)
     }
 
-    /// Builds a graph directly from CSR arrays, taking ownership of them.
+    /// Builds a graph directly from CSR arrays, taking ownership.
     ///
     /// The low-memory entry point: nothing proportional to the edge count is allocated, so a
-    /// connectivity matrix you already hold — scanpy's `connectivities`, say — becomes a graph
-    /// with no copy.
+    /// connectivity matrix you already hold — scanpy's `connectivities`, say — costs no copy.
     ///
     /// Must be the **full symmetric** adjacency: if `j` is in row `i`, `i` must be in row `j`
-    /// with the same weight. Rows need not be sorted (they're sorted in place); duplicates
-    /// within a row are summed, and anything summing to zero is dropped.
-    ///
-    /// # Arguments
-    /// * `node_ptrs` - row offsets, length `n_nodes + 1`, non-decreasing, last equals
-    ///   `neighbors.len()`
-    /// * `neighbors` - column indices
-    /// * `weights` - values, parallel to `neighbors`
-    /// * `node_weights` - per-node weights, or `None` for unit weights
+    /// at the same weight. Rows are sorted in place, duplicates summed, zero sums dropped.
     pub fn from_csr_parts(
         node_ptrs: Vec<usize>,
         neighbors: Vec<u32>,
@@ -255,10 +230,9 @@ impl CSRNetwork {
         Self::finish(node_ptrs, neighbors, weights, node_weights, false)
     }
 
-    /// Sorts each row, merges duplicates, compacts, and derives the cached aggregates.
+    /// Sorts each row, merges duplicates, compacts, derives the cached aggregates.
     ///
-    /// `may_have_gaps` says whether compaction can shrink the arrays. Sorting borrows one
-    /// scratch buffer sized to the largest row, so the temporary is O(max degree), not O(m).
+    /// One scratch buffer sized to the largest row, so the temporary is O(max degree).
     fn finish(
         mut node_ptrs: Vec<usize>,
         mut neighbors: Vec<u32>,
@@ -350,13 +324,11 @@ impl CSRNetwork {
         })
     }
 
-    /// Builds a graph from a sparse adjacency matrix, giving every node unit weight.
+    /// Builds a graph from a sparse adjacency matrix, every node at unit weight.
     ///
-    /// The matrix is treated as symmetric: only entries with `row <= col` are read, and a
-    /// diagonal entry `(v, v, w)` becomes a self-loop of weight `w`. Zero entries are skipped.
-    ///
-    /// Allocates an intermediate edge list. For large inputs prefer
-    /// [`from_csr_parts`](Self::from_csr_parts).
+    /// Treated as symmetric: only `row <= col` is read, and a diagonal entry is a self-loop.
+    /// Allocates an intermediate edge list — prefer
+    /// [`from_csr_parts`](Self::from_csr_parts) for large inputs.
     pub fn from_csr_matrix<W>(matrix: &CsrMatrix<W>) -> Result<Self>
     where
         W: FloatOpsTS + 'static,
@@ -390,10 +362,8 @@ impl CSRNetwork {
         Self::from_edges_with_node_weights(&edges, node_weights)
     }
 
-    /// Returns an iterator over the `(neighbor, weight)` pairs of a node.
-    ///
-    /// Neighbours are yielded in ascending id order, which is what makes candidate-community
-    /// enumeration deterministic.
+    /// A node's `(neighbor, weight)` pairs, in ascending id order — which is what makes
+    /// candidate enumeration deterministic.
     #[inline]
     pub fn neighbors(&self, node: usize) -> CSRNeighborIterator<'_> {
         let start = self.data.node_ptrs[node];
@@ -404,50 +374,49 @@ impl CSRNetwork {
         }
     }
 
-    /// Returns the number of nodes in the network.
+    /// Number of nodes.
     #[inline]
     pub fn node_count(&self) -> usize {
         self.data.node_weights.len()
     }
 
-    /// Returns the number of distinct undirected edges, self-loops included.
+    /// Distinct undirected edges, self-loops included.
     #[inline]
     pub fn edge_count(&self) -> usize {
         self.data.edge_count
     }
 
-    /// Returns the degree (number of distinct neighbours) of a node.
+    /// Number of distinct neighbours.
     #[inline]
     pub fn degree(&self, node: usize) -> usize {
         self.data.node_ptrs[node + 1] - self.data.node_ptrs[node]
     }
 
-    /// Returns the strength of a node: the sum of incident edge weights, with self-loops
-    /// counted twice.
+    /// Sum of incident edge weights, self-loops counted twice.
     #[inline]
     pub fn strength(&self, node: usize) -> f64 {
         self.data.strengths[node]
     }
 
-    /// Returns the weight ("size") of a node.
+    /// A node's weight, i.e. its "size".
     #[inline]
     pub fn node_weight(&self, node: usize) -> f64 {
         self.data.node_weights[node]
     }
 
-    /// Returns the total weight of all edges, each undirected edge counted once.
+    /// Total edge weight, each undirected edge once.
     #[inline]
     pub fn total_weight(&self) -> f64 {
         self.data.total_weight
     }
 
-    /// Returns the sum of all node weights.
+    /// Sum of all node weights.
     #[inline]
     pub fn total_node_weight(&self) -> f64 {
         self.data.node_weights.iter().sum()
     }
 
-    /// Returns the weight of a node's self-loop, or `0.0` if it has none.
+    /// A node's self-loop weight, or `0.0`.
     #[inline]
     pub fn self_loop_weight(&self, node: usize) -> f64 {
         if !self.data.any_self_loops {
@@ -461,7 +430,7 @@ impl CSRNetwork {
         }
     }
 
-    /// Returns the weight of the edge between two nodes, or `None` if there is none.
+    /// Weight of the edge between two nodes, if there is one.
     pub fn edge_weight(&self, from: usize, to: usize) -> Option<f64> {
         // search the shorter row
         let (search_node, target) = if self.degree(from) <= self.degree(to) {
@@ -477,10 +446,8 @@ impl CSRNetwork {
         }
     }
 
-    /// Returns copies of the underlying CSR arrays, as accepted by
-    /// [`from_csr_parts`](Self::from_csr_parts).
-    ///
-    /// Round-tripping through these is lossless.
+    /// Copies of the CSR arrays, as [`from_csr_parts`](Self::from_csr_parts) takes them.
+    /// Round-tripping is lossless.
     pub fn to_csr_parts(&self) -> (Vec<usize>, Vec<u32>, Vec<f32>) {
         (
             self.data.node_ptrs.clone(),
@@ -489,15 +456,12 @@ impl CSRNetwork {
         )
     }
 
-    /// The per-node weights, as accepted by [`from_csr_parts`](Self::from_csr_parts).
+    /// Per-node weights, as [`from_csr_parts`](Self::from_csr_parts) takes them.
     pub fn node_weights(&self) -> &[f64] {
         &self.data.node_weights
     }
 
-    /// Approximate resident size of the graph in bytes.
-    ///
-    /// Useful for sizing a machine before running: at 75M nodes and 750M edges this is
-    /// roughly 14 GB.
+    /// Rough resident size in bytes — ~14 GB at 75M nodes and 750M edges.
     pub fn memory_bytes(&self) -> usize {
         let d = &self.data;
         d.node_ptrs.len() * size_of::<usize>()
@@ -507,13 +471,12 @@ impl CSRNetwork {
             + d.strengths.len() * size_of::<f64>()
     }
 
-    /// Collapses each group into a single super-node.
+    /// Collapses each group into a super-node.
     ///
-    /// Node weights are summed, a group's internal weight becomes a self-loop, and weight
-    /// between groups becomes an ordinary edge. `total_weight` and `Σ strength` are both
-    /// preserved exactly, so quality doesn't change — which is what lets the multilevel scheme
-    /// optimize one objective across levels.
-    pub fn aggregate<G: NetworkGrouping>(&self, grouping: &G) -> Self {
+    /// Node weights sum, a group's internal weight becomes a self-loop, weight between groups
+    /// becomes an edge. `total_weight` and `Σ strength` are preserved exactly, so quality
+    /// doesn't change across levels.
+    pub fn aggregate(&self, grouping: &VectorGrouping) -> Self {
         let n = self.node_count();
         let n_groups = grouping.group_count();
 
@@ -607,7 +570,7 @@ impl CSRNetwork {
             .expect("aggregate produces a structurally valid graph")
     }
 
-    /// Converts the network back to a symmetric sparse matrix.
+    /// Back to a symmetric sparse matrix.
     pub fn to_csr_matrix(&self) -> CsrMatrix<f64> {
         let n = self.node_count();
         let row_ptrs = self.data.node_ptrs.clone();
@@ -617,13 +580,11 @@ impl CSRNetwork {
             .expect("CSR invariants are maintained by construction")
     }
 
-    /// Verifies that the adjacency is exactly symmetric.
+    /// Checks every stored `(v, u, w)` has its `(u, v, w)`.
     ///
     /// Constructors already enforce `Σ strength == 2 · total_weight`, which catches the
-    /// realistic mistakes (a k-NN graph nobody symmetrised). This is the exhaustive version:
-    /// for every stored `(v, u, w)`, check `(u, v, w)` is there too.
-    ///
-    /// O(m log d) — worth running once when wiring up a new input source, not every call.
+    /// realistic mistakes. This is the exhaustive version, O(m log d) — worth running once
+    /// when wiring up a new input source, not every call.
     pub fn validate_symmetry(&self) -> Result<()> {
         for v in 0..self.node_count() {
             for (u, w) in self.neighbors(v) {
@@ -645,13 +606,13 @@ impl CSRNetwork {
         Ok(())
     }
 
-    /// Returns `true` if any node carries a self-loop.
+    /// Whether any node carries a self-loop.
     #[inline]
     pub fn has_self_loops(&self) -> bool {
         self.data.any_self_loops
     }
 
-    /// Returns the fraction of possible edges that are present.
+    /// Fraction of possible edges present.
     pub fn density(&self) -> f64 {
         let n = self.node_count() as f64;
         let max_edges = n * (n - 1.0) / 2.0;
@@ -697,18 +658,12 @@ fn check_edge(from: usize, to: usize, w: f64, n_nodes: usize) -> Result<()> {
 
 /// Checks `Σ strength == 2 · total_weight`.
 ///
-/// This is the invariant the self-loop convention exists to maintain, and it is the cheapest
-/// guard against the failure mode that motivated the 0.7 rewrite: a null model silently
-/// switched off, producing plausible-looking but wrong clusters.
+/// Runs in release too: one O(n) pass against minutes of clustering, and it's the only thing
+/// between an asymmetric input to [`CSRNetwork::from_csr_parts`] and quietly wrong clusters.
+/// Necessary but not sufficient — [`CSRNetwork::validate_symmetry`] is exhaustive.
 ///
-/// Checked in **release builds too**, not just debug. It costs one O(n) pass against minutes
-/// of clustering, and it is the only thing standing between an asymmetric input to
-/// [`CSRNetwork::from_csr_parts`] and quietly corrupt results. It is a necessary condition for
-/// symmetry, not a sufficient one — [`CSRNetwork::validate_symmetry`] is the exhaustive check.
-///
-/// The tolerance is loose (`1e-6` relative) because both sides are naive f64 sums over
-/// possibly hundreds of millions of terms, accumulated in different orders. Any real asymmetry
-/// is off by whole edge weights, many orders of magnitude above that.
+/// The `1e-6` relative tolerance is loose because both sides are naive f64 sums in different
+/// orders. Real asymmetry is off by whole edge weights.
 fn check_degree_sum(data: &CSRNetworkData) -> Result<()> {
     let sum: f64 = data.strengths.iter().sum();
     let expected = 2.0 * data.total_weight;
@@ -738,7 +693,7 @@ impl std::fmt::Display for CSRNetwork {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::network::grouping::{NetworkGrouping, VectorGrouping};
+    use crate::network::grouping::VectorGrouping;
 
     fn triangle_with_loop() -> CSRNetwork {
         // triangle 0-1-2 (unit weights) plus a self-loop of weight 3 on node 0
@@ -851,7 +806,7 @@ mod tests {
         ));
     }
 
-    /// The zero-copy path must produce exactly the same graph as the edge-list path.
+    /// Zero-copy and edge-list paths must give exactly the same graph.
     #[test]
     fn from_csr_parts_matches_from_edges() {
         let edges = [
@@ -921,8 +876,7 @@ mod tests {
         ));
     }
 
-    /// The realistic catastrophic mistake: handing over a k-NN graph that was never
-    /// symmetrised. Node 0 lists node 1, but node 1 does not list node 0.
+    /// The realistic mistake: a kNN graph nobody symmetrised.
     #[test]
     fn asymmetric_input_is_rejected() {
         use crate::error::ClusteringError;
@@ -962,8 +916,7 @@ mod tests {
         }
     }
 
-    /// A "balanced" asymmetry that the degree-sum check cannot see: two errors that cancel in
-    /// the totals. This is what `validate_symmetry` is for.
+    /// Asymmetry that cancels in the totals, so only `validate_symmetry` sees it.
     #[test]
     fn validate_symmetry_catches_what_the_degree_sum_cannot() {
         // strengths and total both balance, but neither edge agrees with its reverse

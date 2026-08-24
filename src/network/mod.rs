@@ -1,11 +1,4 @@
-//! # Network Module
-//!
-//! This module provides the network/graph representation used by the clustering
-//! algorithms, plus the grouping abstraction used to express partitions.
-//!
-//! ## Key Components
-//! - [`CSRNetwork`] - compressed-sparse-row weighted undirected graph
-//! - [`grouping`] - node-to-group assignments (partitions/clusterings)
+//! Graph representation: [`CSRNetwork`] plus the [`grouping`] type partitions come back as.
 
 pub mod grouping;
 

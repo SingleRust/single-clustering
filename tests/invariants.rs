@@ -1,7 +1,7 @@
-//! Properties that must hold for any input, exercised through the public API.
+//! Properties that must hold for any input, through the public API.
 //!
-//! Each of the four below maps to a bug that shipped in 0.6.x. Cheap, no fixtures needed, and
-//! any one failing means the algorithm is wrong rather than unlucky.
+//! Each maps to a bug that shipped in 0.6.x. No fixtures, and any one failing means the
+//! algorithm is wrong rather than unlucky.
 
 use single_clustering::community_search::leiden::{
     Cpm, LeidenConfig, Objective, ObjectiveKind, Partition, Rb, leiden,
@@ -11,13 +11,12 @@ use single_clustering::network::CSRNetwork;
 mod common;
 use common::{disconnected_community_count, sbm, test_graphs};
 
-/// Invariant 1: collapsing communities must not change what a partition scores. Broken in
-/// 0.6.x, where a self-loop added its weight once instead of twice to strength, switching the
-/// null model off above level 0.
+/// Collapsing communities must not change what a partition scores. Broken in 0.6.x, where a
+/// self-loop added its weight once instead of twice and switched the null model off above
+/// level 0.
 ///
-/// Holds to stored-weight precision. Adjacency is `f32`, so a collapsed self-loop carrying a
-/// whole community's internal weight rounds once per level — `1e-6` relative, about 10x f32
-/// epsilon. The bug this guards against was a factor of ~1.75, not 1e-8.
+/// To `1e-6` relative: adjacency is `f32`, so a collapsed self-loop rounds once per level. The
+/// bug this guards against was a factor of ~1.75.
 #[test]
 fn quality_is_invariant_under_aggregation() {
     for (name, graph) in test_graphs() {

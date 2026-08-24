@@ -1,6 +1,6 @@
 [package]
 name = "single-clustering"
-version = "0.7.0"
+version = "1.0.0"
 edition = "2024"
 authors = ["Ian F. Diks"]
 homepage = "https://singlerust.com"
@@ -10,29 +10,43 @@ readme = "README.md"
 description = "A high-performance network clustering library implementing community detection algorithms like Louvain and Leiden. Features efficient graph representation, abstract grouping systems, and K-NN graph creation from high-dimensional data. Provides parallel computation support via Rayon for handling large networks."
 
 [features]
-default = ["knn"]
-# k-nearest-neighbour graph construction from high-dimensional data. Split out so the
-# clustering core can be built and tested without the HNSW/kd-tree stack, which does not
-# compile on every target.
+default = ["knn", "parallel"]
+# kNN graph construction. Split out so the clustering core builds without the HNSW/kd-tree
+# stack. Spatial graphs need no feature of their own - the grid index has no dependencies.
 knn = ["dep:hnsw_rs", "dep:kiddo", "dep:ndarray"]
+# Every rayon call in the crate, behind one switch. Off gives a genuinely single-threaded
+# build - except that `knn` drags in hnsw_rs, which threads internally either way.
+parallel = ["dep:rayon"]
+# Shared test fixtures, so unit and integration tests use one copy. Not public API.
+testdata = []
 
 [dependencies]
 anyhow = "1.0.100"
 nalgebra-sparse = "0.10.0"
-num-traits = "0.2.19"
-rayon = "1.10.0"
+rayon = { version = "1.10.0", optional = true }
 single-utilities = "0.8.6"
 rand = "0.9.0"
 rand_chacha = { version = "0.9.0" }
 
 kiddo = { version = "5.2.2", optional = true }
-ndarray = { version = "0.16.1", features = ["rayon"], optional = true }
-hnsw_rs = { version = "0.3.2", features = ["simdeez_f"], optional = true }
+ndarray = { version = "0.16.1", optional = true }
+delaunator = "1.1.0"
 
 [dev-dependencies]
+single-clustering = { path = ".", default-features = false, features = ["testdata"] }
+# thread_invariance builds its own pools, so it needs rayon even when `parallel` is off
+rayon = "1.10.0"
 serde_json = "1.0"
 criterion = { version = "0.5", features = ["html_reports"] }
 
 [[bench]]
 name = "leiden"
 harness = false
+
+# simdeez_f is x86-only: anndists imports simdeez::{avx2,sse2} unguarded, so it cannot
+# compile on aarch64. Keep the SIMD where it works, drop it where it doesn't.
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+hnsw_rs = { version = "0.3.2", features = ["simdeez_f"], optional = true }
+
+[target.'cfg(not(target_arch = "x86_64"))'.dependencies]
+hnsw_rs = { version = "0.3.2", optional = true }

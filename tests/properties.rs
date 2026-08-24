@@ -1,10 +1,8 @@
 //! Randomised property tests.
 //!
-//! The rest of the suite uses hand-picked graphs, which only covers what somebody thought to
-//! write down. This generates graphs and configs at random and checks the invariants hold —
-//! that's what catches the combination nobody considered.
-//!
-//! Failures print the seed, so counterexamples are reproducible.
+//! Hand-picked graphs only cover what somebody thought to write down. These generate graphs
+//! and configs at random, which is what catches the combination nobody considered. Failures
+//! print the seed.
 
 use single_clustering::community_search::leiden::{
     Cpm, LeidenConfig, Objective, ObjectiveKind, Partition, Rb, leiden, modularity,

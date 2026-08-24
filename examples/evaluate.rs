@@ -1,8 +1,7 @@
 //! Head-to-head evaluation against `leidenalg` on LFR benchmarks and large kNN graphs.
 //!
-//! Reads graphs and reference results produced by the generator in `tools/`, runs our
-//! algorithm on the same inputs, and reports NMI against ground truth, modularity, and wall
-//! time for both.
+//! Reads graphs and reference results from `tools/`, runs ours on the same inputs, and reports
+//! NMI against ground truth, modularity and wall time for both.
 //!
 //! ```text
 //! cargo run --release --no-default-features --example evaluate -- <evaldata-dir>
