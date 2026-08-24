@@ -86,19 +86,8 @@ pub fn refine(
         );
         (sorted, out)
     };
-    let nonempty = members.iter().filter(|m| !m.is_empty());
-
-    #[cfg(feature = "parallel")]
-    let refined: Vec<(Vec<u32>, Vec<u32>)> = {
-        use rayon::prelude::*;
-        nonempty
-            .collect::<Vec<_>>()
-            .into_par_iter()
-            .map(refine_one)
-            .collect()
-    };
-    #[cfg(not(feature = "parallel"))]
-    let refined: Vec<(Vec<u32>, Vec<u32>)> = nonempty.map(refine_one).collect();
+    let nonempty: Vec<&Vec<u32>> = members.iter().filter(|m| !m.is_empty()).collect();
+    let refined = crate::par::map_range(nonempty.len(), |i| refine_one(nonempty[i]));
 
     let mut labels = vec![0u32; n];
     for (sorted, out) in refined {

@@ -36,11 +36,18 @@ jobs:
       - name: Test (release)
         run: cargo test --no-default-features --release
 
-      # must give byte-identical results, so it needs its own run
+      # `parallel` is on by default, so both halves need their own run
       - name: Clippy (parallel)
         run: cargo clippy --no-default-features --features parallel --all-targets -- -D warnings
       - name: Test (parallel)
         run: cargo test --no-default-features --features parallel --release
+
+      # and the two must agree exactly, or the feature is changing more than speed
+      - name: Feature parity
+        run: |
+          cargo run -q --release --no-default-features --example feature_parity > seq.txt
+          cargo run -q --release --no-default-features --features parallel --example feature_parity > par.txt
+          diff seq.txt par.txt
 
   # the #[ignore]d tests: scale runs and the exhaustive optimality sweep, ~11s. Without this
   # the HD-scale path and the Bell(12) check never run anywhere.

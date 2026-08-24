@@ -11,7 +11,6 @@ use hnsw_rs::{
 use kiddo::traits::DistanceMetric;
 use nalgebra_sparse::{CooMatrix, CsrMatrix};
 use ndarray::ArrayViewD;
-use rayon::prelude::*;
 use single_utilities::traits::FloatOpsTS;
 
 /// Distance and connectivity matrices from a kNN search.
@@ -42,15 +41,15 @@ where
     }
 
     // kd-tree hands back squared distances; everything downstream wants real ones
-    let (indices, distances): (Vec<Vec<usize>>, Vec<Vec<T>>) = (0..n_samples)
-        .into_par_iter()
-        .map(|i| {
+    let (indices, distances): (Vec<Vec<usize>>, Vec<Vec<T>>) =
+        crate::par::map_range(n_samples, |i| {
             kdtree
                 .nearest_n::<D>(&point_at::<T, K>(&data, i), (k + 1) as usize)
                 .into_iter()
                 .map(|h| (h.item as usize, h.distance.sqrt()))
                 .unzip()
         })
+        .into_iter()
         .unzip();
 
     gaussian_result(n_samples, k, &indices, &distances)
@@ -80,10 +79,9 @@ where
     hnsw.set_extend_candidates(false);
     hnsw.modify_level_scale(0.5);
 
-    let rows: Vec<Vec<T>> = (0..n_samples)
-        .into_par_iter()
-        .map(|i| (0..n_features).map(|j| data[[i, j]]).collect())
-        .collect();
+    let rows: Vec<Vec<T>> = crate::par::map_range(n_samples, |i| {
+        (0..n_features).map(|j| data[[i, j]]).collect()
+    });
     let slices: Vec<(&[T], usize)> = rows
         .iter()
         .enumerate()
@@ -189,50 +187,47 @@ where
         }
     }
 
-    let sigmas: Vec<T> = distances
-        .par_iter()
-        .map(|row| {
-            let mut nonzero: Vec<T> = row.iter().filter(|&&d| d > T::zero()).copied().collect();
-            if nonzero.is_empty() {
-                return T::one();
-            }
-            let mid = nonzero.len() / 2;
-            nonzero.select_nth_unstable_by(mid, |a, b| {
-                a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
-            });
-            nonzero[mid]
-        })
-        .collect();
+    let sigmas: Vec<T> = crate::par::map_range(distances.len(), |i| {
+        let mut nonzero: Vec<T> = distances[i]
+            .iter()
+            .filter(|&&d| d > T::zero())
+            .copied()
+            .collect();
+        if nonzero.is_empty() {
+            return T::one();
+        }
+        let mid = nonzero.len() / 2;
+        nonzero.select_nth_unstable_by(mid, |a, b| {
+            a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        nonzero[mid]
+    });
 
     let min_weight = T::from_f64(1e-14).unwrap();
     let two = T::from(2).unwrap();
-    let connectivity_triplets: Vec<(usize, usize, T)> = (0..n_samples)
-        .into_par_iter()
-        .fold(Vec::new, |mut acc, i| {
-            // skip(1) drops the self hit; `i <= j` keeps each pair once
-            for (slot, &j) in indices[i].iter().enumerate().skip(1) {
-                if i > j {
-                    continue;
-                }
-                let d = distances[i][slot];
-                let den = sigmas[i] * sigmas[i] + sigmas[j] * sigmas[j];
-                if den <= T::zero() {
-                    continue;
-                }
-                let weight = (two * sigmas[i] * sigmas[j] / den).sqrt() * (-(d * d) / den).exp();
-                if weight > min_weight {
-                    acc.push((i, j, weight));
-                    if i != j {
-                        acc.push((j, i, weight));
-                    }
+    let connectivity_triplets: Vec<(usize, usize, T)> = crate::par::map_range(n_samples, |i| {
+        let mut out = Vec::new();
+        // skip(1) drops the self hit; `i <= j` keeps each pair once
+        for (slot, &j) in indices[i].iter().enumerate().skip(1) {
+            if i > j {
+                continue;
+            }
+            let d = distances[i][slot];
+            let den = sigmas[i] * sigmas[i] + sigmas[j] * sigmas[j];
+            if den <= T::zero() {
+                continue;
+            }
+            let weight = (two * sigmas[i] * sigmas[j] / den).sqrt() * (-(d * d) / den).exp();
+            if weight > min_weight {
+                out.push((i, j, weight));
+                if i != j {
+                    out.push((j, i, weight));
                 }
             }
-            acc
-        })
-        .reduce(Vec::new, |mut a, b| {
-            a.extend(b);
-            a
-        });
+        }
+        out
+    })
+    .concat();
 
     Ok(NeighborResult {
         distances: csr_from_triplets(n_samples, distance_triplets)?,

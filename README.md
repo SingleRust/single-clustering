@@ -86,8 +86,8 @@ pipeline rather than the algorithm.
 | 500k | 4.0M | 1.113 s | 0.912 s | 1.469 s | 1.32× / **1.61×** |
 | 1M | 8.0M | 2.568 s | 2.202 s | 3.410 s | 1.33× / **1.55×** |
 
-Single-threaded it is a consistent **1.33×**; with the `parallel` feature, which multi-threads
-refinement, **1.55–1.70×**. Modularity is identical to four decimals throughout — the same
+Single-threaded it is a consistent **1.33×**; with `parallel` — on by default, and what
+multi-threads refinement — **1.55–1.70×**. Modularity is identical to four decimals throughout — the same
 answer computed faster, not a different tradeoff. Reproduce with `examples/vs_igraph.rs` and
 `tools/igraph_bench.py`.
 
@@ -112,13 +112,13 @@ Single-threaded scaling on synthetic k-NN graphs:
 | 3M | 25M | 6.8 s |
 | 8M | 57M | 20.1 s |
 
-Spatial graph construction:
+Spatial graph construction, which `parallel` also covers:
 
-| | |
-|---|---|
-| Visium HD lattice, 10.5M bins / 21.1M edges | 954 ms, 591 MB |
-| 500k cells, k-NN (k=6) | 299 ms |
-| 500k cells, radius | 80 ms |
+| | default | single-threaded |
+|---|---|---|
+| Visium HD lattice, 10.5M bins / 21.1M edges | 954 ms, 591 MB | — |
+| 500k cells, k-NN (k=6) | 283 ms | 731 ms |
+| 500k cells, radius | 73 ms | 233 ms |
 
 ## Usage
 
@@ -206,16 +206,19 @@ clustering core:
 single-clustering = { version = "1.0", default-features = false }
 ```
 
-Multi-threaded refinement is behind an off-by-default `parallel` feature. It is off because
-local moving — the larger half of the work — is still sequential, so the gain is 1.2-1.3x
-rather than the several-x a fully parallel implementation would give:
+The default-on `parallel` feature is the single switch for every rayon call in the crate —
+refinement, and the spatial graph builders. Turning it off gives a single-threaded build:
 
 ```toml
-single-clustering = { version = "1.0", features = ["parallel"] }
+single-clustering = { version = "1.0", default-features = false, features = ["knn"] }
 ```
 
-Results are byte-identical regardless of thread count; `tests/thread_invariance.rs` asserts it
-across thread counts, objectives and seeds.
+The one caveat is that `knn` pulls in `hnsw_rs`, which threads internally either way.
+
+Results do not depend on it. `tests/thread_invariance.rs` asserts byte-identical labels across
+thread counts, objectives and seeds, and `examples/feature_parity.rs` fingerprints clustering
+and both spatial builders so CI can diff a sequential build against a parallel one. The feature
+changes speed and nothing else.
 
 ## Current status
 
@@ -229,8 +232,8 @@ across thread counts, objectives and seeds.
   Leiden finds spatial domains
 - 🚧 **Louvain**: available as `LeidenConfig { refine: false, .. }`; no separate entry point
 - 🚧 **Benchmarks**: `cargo run --release --example scaling`
-- ✅ **Parallel refinement** (`parallel` feature): communities refine independently, so there
-  is no shared state to race on. 1.2-1.3x, and byte-identical across thread counts
+- ✅ **Parallel refinement** (`parallel` feature, on by default): communities refine
+  independently, so there is no shared state to race on. 1.2-1.3x, byte-identical
 - ❌ **Parallel local moving**: the other 65% of a pass, and the harder half — it mutates
   shared community aggregates, which is what the pre-0.7 parallel path got wrong
 - ❌ **DBSCAN / HDBSCAN**: planned

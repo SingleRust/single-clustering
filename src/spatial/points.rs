@@ -7,8 +7,6 @@
 //! On Visium, pass [`visium_isometric_coords`](super::visium_isometric_coords) instead of raw
 //! lattice coordinates.
 
-use rayon::prelude::*;
-
 use crate::error::{ClusteringError, Result};
 use crate::network::{CSRNetwork, MAX_NODES};
 use crate::spatial::grid::{Grid, distance_sq};
@@ -119,10 +117,9 @@ pub fn radius_graph<const D: usize>(
     let grid = Grid::new(points, radius);
     let r2 = radius * radius;
 
-    let mut adjacency: Vec<Vec<Candidate>> = points
-        .par_iter()
-        .enumerate()
-        .map(|(i, p)| {
+    let mut adjacency: Vec<Vec<Candidate>> = crate::par::map_range(points.len(), |i| {
+        let p = &points[i];
+        {
             let centre = grid.cell_of(p);
             let reach = (radius / grid.cell_size()).ceil() as usize;
             let mut found: Vec<Candidate> = Vec::new();
@@ -142,8 +139,8 @@ pub fn radius_graph<const D: usize>(
                 found.truncate(cap);
             }
             found
-        })
-        .collect();
+        }
+    });
 
     // capping breaks symmetry; without a cap this is a no-op
     if max_degree.is_some() {
@@ -181,10 +178,9 @@ pub fn knn_graph<const D: usize>(
     // a handful of points per cell, so one or two rings usually suffice
     let grid = Grid::new(points, typical_spacing(points, k));
 
-    let mut adjacency: Vec<Vec<Candidate>> = points
-        .par_iter()
-        .enumerate()
-        .map(|(i, p)| {
+    let mut adjacency: Vec<Vec<Candidate>> = crate::par::map_range(points.len(), |i| {
+        let p = &points[i];
+        {
             let centre = grid.cell_of(p);
             let limit = grid.max_ring(&centre);
             let mut found: Vec<Candidate> = Vec::with_capacity(k * 2);
@@ -212,8 +208,8 @@ pub fn knn_graph<const D: usize>(
             found.sort_unstable_by(|a, b| a.1.partial_cmp(&b.1).unwrap().then(a.0.cmp(&b.0)));
             found.truncate(k);
             found
-        })
-        .collect();
+        }
+    });
 
     symmetrise(&mut adjacency, symmetry);
     assemble(adjacency, weight)

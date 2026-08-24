@@ -10,30 +10,32 @@ readme = "README.md"
 description = "A high-performance network clustering library implementing community detection algorithms like Louvain and Leiden. Features efficient graph representation, abstract grouping systems, and K-NN graph creation from high-dimensional data. Provides parallel computation support via Rayon for handling large networks."
 
 [features]
-default = ["knn"]
+default = ["knn", "parallel"]
 # kNN graph construction. Split out so the clustering core builds without the HNSW/kd-tree
-# stack. Spatial graphs need no feature - the uniform-grid index has no dependencies.
+# stack. Spatial graphs need no feature of their own - the grid index has no dependencies.
 knn = ["dep:hnsw_rs", "dep:kiddo", "dep:ndarray"]
-# Multi-threaded refinement. Off until local moving is parallel too, since refinement alone is
-# worth about 1.25x.
-parallel = []
+# Every rayon call in the crate, behind one switch. Off gives a genuinely single-threaded
+# build - except that `knn` drags in hnsw_rs, which threads internally either way.
+parallel = ["dep:rayon"]
 # Shared test fixtures, so unit and integration tests use one copy. Not public API.
 testdata = []
 
 [dependencies]
 anyhow = "1.0.100"
 nalgebra-sparse = "0.10.0"
-rayon = "1.10.0"
+rayon = { version = "1.10.0", optional = true }
 single-utilities = "0.8.6"
 rand = "0.9.0"
 rand_chacha = { version = "0.9.0" }
 
 kiddo = { version = "5.2.2", optional = true }
-ndarray = { version = "0.16.1", features = ["rayon"], optional = true }
+ndarray = { version = "0.16.1", optional = true }
 delaunator = "1.1.0"
 
 [dev-dependencies]
 single-clustering = { path = ".", default-features = false, features = ["testdata"] }
+# thread_invariance builds its own pools, so it needs rayon even when `parallel` is off
+rayon = "1.10.0"
 serde_json = "1.0"
 criterion = { version = "0.5", features = ["html_reports"] }
 

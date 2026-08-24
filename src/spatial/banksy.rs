@@ -10,8 +10,6 @@
 //!
 //! The weight matrix is row-normalised and so asymmetric — an operator, not a graph.
 
-use rayon::prelude::*;
-
 use crate::error::{ClusteringError, Result};
 use crate::spatial::grid::{Grid, distance_sq};
 
@@ -91,10 +89,9 @@ impl NeighbourhoodOperator {
         let grid = Grid::new(coords, typical_spacing(coords, want.max(1)));
 
         // sorted by (distance, id) so ties don't depend on visit order
-        let found: Vec<Vec<(u32, f64)>> = coords
-            .par_iter()
-            .enumerate()
-            .map(|(i, p)| {
+        let found: Vec<Vec<(u32, f64)>> = crate::par::map_range(coords.len(), |i| {
+            let p = &coords[i];
+            {
                 let centre = grid.cell_of(p);
                 let mut cand: Vec<(u32, f64)> = Vec::with_capacity(want * 2);
                 for ring in 0..=grid.max_ring(&centre) {
@@ -117,8 +114,8 @@ impl NeighbourhoodOperator {
                 cand.sort_unstable_by(|a, b| a.1.partial_cmp(&b.1).unwrap().then(a.0.cmp(&b.0)));
                 cand.truncate(want);
                 cand
-            })
-            .collect();
+            }
+        });
 
         let mut node_ptrs = Vec::with_capacity(n + 1);
         node_ptrs.push(0usize);
@@ -199,9 +196,8 @@ impl NeighbourhoodOperator {
         }
 
         let mut out = vec![0.0f64; self.n_cells * n_features];
-        out.par_chunks_mut(n_features)
-            .enumerate()
-            .for_each(|(i, row)| {
+        crate::par::fill_chunks(&mut out, n_features, |i, row| {
+            {
                 let span = self.node_ptrs[i]..self.node_ptrs[i + 1];
                 #[allow(clippy::reversed_empty_ranges)]
                 if m == 0 {
@@ -245,7 +241,8 @@ impl NeighbourhoodOperator {
                         *o = (*o * *o + i_acc * i_acc).sqrt();
                     }
                 }
-            });
+            }
+        });
         Ok(out)
     }
 }

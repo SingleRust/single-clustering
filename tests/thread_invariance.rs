@@ -5,7 +5,8 @@
 //! what makes that visible.
 //!
 //! Same inputs under 1, 2, 4, 8 and 16 rayon threads, demanding byte-identical labels. Only
-//! meaningful with the `parallel` feature, but passes either way.
+//! meaningful with the `parallel` feature, which is on by default; without it the crate
+//! ignores thread count entirely and this passes trivially.
 
 mod common;
 
